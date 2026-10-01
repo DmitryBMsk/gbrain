@@ -148,6 +148,19 @@ describe('parseFactsFence — strikethrough semantics (Codex R2-#3 contract)', (
     expect(r.facts[1].active).toBe(true);
   });
 
+  test('struck multiline rows stay inactive after a render/parse round trip', () => {
+    const rendered = renderFactsTable([
+      minimalFact(1, { claim: 'Old\n- a\n- b', active: false, supersededBy: 2, context: 'superseded by #2' }),
+      minimalFact(2, { claim: 'New claim' }),
+      minimalFact(3, { claim: 'Gone\nline', active: false, forgotten: true, context: 'forgotten: user asked' }),
+    ]);
+    const r = parseFactsFence(rendered);
+    expect(r.warnings).toEqual([]);
+    expect(r.facts[0]).toMatchObject({ claim: 'Old\n- a\n- b', active: false, supersededBy: 2 });
+    expect(r.facts[1].active).toBe(true);
+    expect(r.facts[2]).toMatchObject({ claim: 'Gone\nline', active: false, forgotten: true });
+  });
+
   test('strikethrough + "forgotten: <reason>" context → forgotten=true', () => {
     const body = wrapFenceBody(
       `| 1 | ~~Stale fact~~ | fact | 1.0 | private | low | 2018-01-01 | 2026-05-10 | inferred | forgotten: user asked to remove |`,

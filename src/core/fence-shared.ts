@@ -74,7 +74,8 @@ export function isSeparatorRow(cells: string[]): boolean {
  * via the `context` cell at the domain layer, not here).
  */
 export function stripStrikethrough(s: string): { text: string; struck: boolean } {
-  const m = s.match(/^~~(.+?)~~$/);
+  // [\s\S] rather than `.`: cells may hold decoded newlines (<br>).
+  const m = s.match(/^~~([\s\S]+?)~~$/);
   if (m) return { text: m[1].trim(), struck: true };
   return { text: s, struck: false };
 }
