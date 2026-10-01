@@ -64,7 +64,7 @@ import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { chat as gatewayChat, withBudgetTracker, isAvailable } from '../ai/gateway.ts';
-import { createGlobalLlmHaltTracker, haltedClassOf, type GlobalLlmErrorClass } from '../ai/errors.ts';
+import { createGlobalLlmHaltTracker, haltedClassOf, providerContentBlockReason, type GlobalLlmErrorClass } from '../ai/errors.ts';
 import { importFromContent } from '../import-file.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
@@ -97,7 +97,7 @@ export const DEFAULT_EXTRACT_MAX_OUTPUT_TOKENS = 4096;
 
 /**
  * gbrain#4148: consecutive same-content failures of a content-deterministic
- * class (malformed model output) before the page is tombstoned so the
+ * class (malformed model output or provider content block) before the page is tombstoned so the
  * backlog floor can clear. A content edit resets the streak.
  */
 export const MAX_DETERMINISTIC_FAILURES = 3;
@@ -1073,6 +1073,17 @@ export async function runPhaseExtractAtoms(
     }
   }
 
+  async function tombstoneDeterministicFailure(item: WorkItem, failCount: number | null): Promise<void> {
+    if (failCount == null || failCount < MAX_DETERMINISTIC_FAILURES || opts.dryRun) return;
+    if (item.kind === 'page') {
+      await stampAtomsScanHash(item);
+      tombstonedForFailures.push(item.slug);
+    } else {
+      await stampTranscriptTombstone(item.filePath, item.contentHash);
+      tombstonedTranscripts.push(item.filePath);
+    }
+  }
+
   await withBudgetTracker(budgetTracker, async () => {
   for (const item of work) {
     await maybeYield();
@@ -1138,15 +1149,7 @@ export async function runPhaseExtractAtoms(
         // edit re-eligibilizes (stamp is hash-keyed). Transient provider
         // errors never reach here — they throw and take the catch path.
         // v146: transcripts get the identical bound, via their own store.
-        if (failCount != null && failCount >= MAX_DETERMINISTIC_FAILURES && !opts.dryRun) {
-          if (item.kind === 'page') {
-            await stampAtomsScanHash(item);
-            tombstonedForFailures.push(item.slug);
-          } else {
-            await stampTranscriptTombstone(item.filePath, item.contentHash);
-            tombstonedTranscripts.push(item.filePath);
-          }
-        }
+        await tombstoneDeterministicFailure(item, failCount);
         continue;
       }
       const atoms = parseOutcome.atoms;
@@ -1347,11 +1350,24 @@ export async function runPhaseExtractAtoms(
       }
       // gbrain#4148: classify. Transient provider/infra errors (timeouts,
       // rate limits, 5xx, network) stay retryable and are NOT counted toward
-      // any tombstone. Everything else gets a durable count for
-      // observability, but only the malformed-output class (handled above)
-      // ever tombstones — an unknown error class must never permanently
+      // any tombstone. Provider content blocks use the deterministic path
+      // before the outage check. Everything else gets a durable count for observability, but
+      // unknown error classes must never permanently
       // suppress a page's atoms.
       const message = err instanceof Error ? err.message : String(err);
+      const blockReason = providerContentBlockReason(err);
+      if (blockReason) {
+        llmHalt.reset();
+        hardFailureCount++;
+        const failCount = await recordItemFailureCount(item);
+        failures.push({
+          source: originLabel,
+          error: `provider blocked content: ${blockReason}` +
+            (failCount != null ? ` (consecutive failure ${failCount} on this content)` : ''),
+        });
+        await tombstoneDeterministicFailure(item, failCount);
+        continue;
+      }
       // #3044: a whole-run LLM outage halts the phase. No
       // recordItemFailureCount here — a global outage says nothing about the
       // content, so it must not pre-charge the per-page tombstone counter.

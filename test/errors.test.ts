@@ -1,5 +1,29 @@
 import { describe, test, expect } from 'bun:test';
 import { buildError, errorFor, serializeError, StructuredAgentError } from '../src/core/errors.ts';
+import { isProviderContentBlock, normalizeAIError } from '../src/core/ai/errors.ts';
+
+describe('isProviderContentBlock', () => {
+  const blocked = Object.assign(new Error('Invalid JSON response'), {
+    name: 'AI_APICallError', statusCode: 200,
+    responseBody: JSON.stringify({ promptFeedback: { blockReason: 'PROHIBITED_CONTENT' } }),
+  });
+
+  test('recognizes a blocked response through normalization', () => {
+    expect(isProviderContentBlock(blocked)).toBe(true);
+    expect(isProviderContentBlock(normalizeAIError(blocked, 'chat(google:x)'))).toBe(true);
+    expect(isProviderContentBlock({ responseBody: JSON.stringify({ candidates: [{ finishReason: 'SAFETY', content: { parts: [] } }] }) })).toBe(true);
+  });
+
+  test('ignores ordinary provider failures and malformed bodies', () => {
+    for (const err of [
+      { statusCode: 500, responseBody: blocked.responseBody },
+      new Error('timeout'),
+      { responseBody: 'not json' },
+      { statusCode: 200 },
+      { responseBody: JSON.stringify({ candidates: [{ finishReason: 'SAFETY', content: { parts: [{ text: 'answer' }] } }] }) },
+    ]) expect(isProviderContentBlock(err)).toBe(false);
+  });
+});
 
 describe('buildError', () => {
   test('returns envelope with required fields only', () => {
