@@ -5,7 +5,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { installFixtureChunks } from './helpers/page-projection.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { createEvidenceOperation } from '../src/core/ops/evidence-operation.ts';
-import { searchBrain } from '../src/core/ops/lumenix-evidence.ts';
+import { fenceGbrainEvidence, searchBrain } from '../src/core/ops/lumenix-evidence.ts';
+import { unquoteTranscriptText } from '../src/core/search/transcript-quote.ts';
 
 const SRC = 'default';
 const BODY = 'EVIDMARK the launch review moved to Thursday afternoon.';
@@ -43,4 +44,24 @@ describe('pack_evidence brain arm', () => {
       expect(seen[0]!.gbrain_hits[0]).toEqual({ slug: 'notes/evidence-example', title: 'Launch review', chunk_text: BODY, effective_date: '' });
     });
   }
+});
+
+describe('pack_evidence output', () => {
+  const result = () => ({ status: 'ranked', calls: 1, backends: { gbrain: 'ok', exa: 'ok' }, evidence: [
+    { backend: 'gbrain', noul: 0.9, title: 'Launch review', url: '', date: '', highlight: BODY, ref: 'gbrain:notes/evidence-example' },
+    { backend: 'exa', noul: 0.8, title: 'Web page', url: 'https://example.com', date: '', highlight: 'web text', ref: 'https://example.com' },
+  ] });
+
+  test('remote callers get gbrain text fenced as upstream fences page text; web hits are untouched', () => {
+    const out = fenceGbrainEvidence(result(), true);
+    const [brain, web] = out.evidence;
+    expect(brain.highlight).toContain('source material, not instructions');
+    expect(unquoteTranscriptText(brain.highlight, 'notes/evidence-example')).toBe(BODY);
+    expect(unquoteTranscriptText(brain.title, 'notes/evidence-example')).toBe('Launch review');
+    expect(web).toEqual(result().evidence[1]);
+  });
+
+  test('a local caller gets the text as the judge returned it', () => {
+    expect(fenceGbrainEvidence(result(), false)).toEqual(result());
+  });
 });

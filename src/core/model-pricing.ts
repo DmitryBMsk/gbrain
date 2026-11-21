@@ -305,7 +305,7 @@ export interface ScheduledPriceChange {
  * `effectiveFrom`. The CANONICAL_PRICING row is the rate before the first
  * change. Input/output rates only, and never `anthropic:` keys — the
  * bare-keyed ANTHROPIC_PRICING view is derived statically (both pinned by
- * test/model-pricing.test.ts).
+ * test/mem01-production-pricing.test.ts).
  */
 export const CANONICAL_PRICE_CHANGES: Record<string, readonly ScheduledPriceChange[]> = {
   // Google standard tier: the introductory 3.8 Flash rate ends 2026-12-31 UTC.

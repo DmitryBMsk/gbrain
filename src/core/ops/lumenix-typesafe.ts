@@ -1,26 +1,23 @@
 // Installed as src/core/ops/lumenix-typesafe.ts in the hosted gbrain checkout.
 import type { Operation } from './contract.ts';
+import { execFile } from '../spawn.ts';
 
 type Result = { status: string; suggestions: string[]; [key: string]: unknown };
 type Runner = (input: string) => Promise<string>;
 const unavailable = (): Result => ({ status: 'unavailable', suggestions: [], reason: 'selector_unavailable' });
 let active = 0;
 
-const runContainer: Runner = async (input) => {
-  // Lazy per call: a module serving remote ops keeps child_process off its top level (operations-trust-boundary).
-  const { execFile } = await import('../spawn.ts');
-  return new Promise((resolve, reject) => {
-    const child = execFile('/usr/bin/docker', [
-      'exec', '-i', 'openclaw', 'python3',
-      '/home/node/.openclaw/workspace/skills/typesafe-ai/scripts/typesafe-skill-suggestion.py',
-    ], { timeout: 14000, maxBuffer: 100000, encoding: 'utf8' }, (err, stdout) => {
-      if (err) reject(new Error('selector unavailable'));
-      else resolve(stdout);
-    });
-    child.stdin?.on('error', () => {});
-    child.stdin?.end(input);
+const runContainer: Runner = (input) => new Promise((resolve, reject) => {
+  const child = execFile('/usr/bin/docker', [
+    'exec', '-i', 'openclaw', 'python3',
+    '/home/node/.openclaw/workspace/skills/typesafe-ai/scripts/typesafe-skill-suggestion.py',
+  ], { timeout: 14000, maxBuffer: 100000, encoding: 'utf8' }, (err, stdout) => {
+    if (err) reject(new Error('selector unavailable'));
+    else resolve(stdout);
   });
-};
+  child.stdin?.on('error', () => {});
+  child.stdin?.end(input);
+});
 
 export async function runSuggestion(p: Record<string, unknown>, runner: Runner = runContainer): Promise<Result> {
   if (p.dry_run === true) return { status: 'dry_run', suggestions: [], calls: 0 };

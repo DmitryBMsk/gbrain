@@ -26,6 +26,7 @@ import { supervisorLockId, SUPERVISOR_LOCK_TTL_MIN } from '../src/core/minions/s
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { registerWorker } from '../src/core/minions/worker-registry.ts';
 
 let engine: PGLiteEngine;
 let scratch: string;
@@ -174,7 +175,7 @@ describe('readJobsWatchHealth', () => {
         expect(h.minutes_since_completion).toBe(op.wedge.minutes_since_completion);
       });
     }
-    // Default threshold 15: 60 min since completion → wedged. Threshold 120 → not.
+    // No registered worker here, so 0.60 reports no_worker at any threshold; threshold 120 still means not wedged.
     await withEnv({ GBRAIN_WEDGED_QUEUE_WARN_MINUTES: undefined }, async () => {
       const h = ok(await readJobsWatchHealth(engine, { pidFile }));
       expect([h.wedged, h.no_worker]).toEqual([false, true]); // 0.60 get_job_stats: waiting work with no registered worker is no_worker, not wedged
@@ -182,6 +183,27 @@ describe('readJobsWatchHealth', () => {
     await withEnv({ GBRAIN_WEDGED_QUEUE_WARN_MINUTES: '120' }, async () => {
       expect(ok(await readJobsWatchHealth(engine, { pidFile })).wedged).toBe(false);
     });
+  });
+
+  test('with a registered worker the threshold decides wedged, as get_job_stats does', async () => {
+    await seedWaiting(2, 90);
+    await seedCompleted(60);
+    const home = mkdtempSync(join(tmpdir(), 'jwh-home-'));
+    try {
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        const unregister = registerWorker({ pid: process.pid, queue: 'default', nice_requested: null, nice_effective: null, started_at: Date.now() });
+        try {
+          // Default threshold 15: 60 min since completion with a live worker → wedged. Threshold 120 → not.
+          await withEnv({ GBRAIN_WEDGED_QUEUE_WARN_MINUTES: undefined }, async () => {
+            const h = ok(await readJobsWatchHealth(engine, { pidFile }));
+            expect([h.wedged, h.no_worker]).toEqual([true, false]);
+          });
+          await withEnv({ GBRAIN_WEDGED_QUEUE_WARN_MINUTES: '120' }, async () => {
+            expect(ok(await readJobsWatchHealth(engine, { pidFile })).wedged).toBe(false);
+          });
+        } finally { unregister(); }
+      });
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
 
   test('healthy progress: live supervisor lock + active lease + recent completion → running via db_lock', async () => {

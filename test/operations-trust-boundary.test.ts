@@ -515,7 +515,11 @@ describe('ops-module system-access containment — top-level fs/child_process im
   // handler never lets a remote caller reach the fs/child_process surface
   // before exempting it.
   const EXEMPT: ReadonlyMap<string, string> = new Map<string, string>([
-    // (empty today — no flagged module contributes a non-localOnly op)
+    // Lumenix fork: built for remote bots. Spawns only the fixed argv `docker exec -i openclaw python3 <fixed script>`
+    // (no shell, no caller-controlled argv); the sanitized request/roster reach only its stdin (300 KB cap) and only
+    // after sensitive=false; at most 2 run at once; dry-run and sensitive input never spawn. pack_evidence spawns the
+    // same way from the helper evidence-operation.ts, which contributes no ops.
+    ['suggest_skill', 'lumenix fork: fixed docker-exec argv, sanitized input on stdin only after sensitive=false, 2 concurrent max'],
   ]);
 
   const OPS_DIR = join(import.meta.dir, '..', 'src', 'core', 'ops');
