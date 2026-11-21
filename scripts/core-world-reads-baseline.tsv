@@ -613,8 +613,10 @@ src/core/onboard/writeback-nudge.ts	process_env	1	W6: settings plane out of the 
 src/core/operation-load.ts	module_collection	1	W6: per-engine state, or mark as a constant table
 src/core/ops/context.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/ops/contract.ts	module_collection	1	W6: per-engine state, or mark as a constant table
+src/core/ops/evidence-operation.ts	spawn_import	1	lumenix fork: docker exec into the openclaw container runs the external selector/judge; stays while the op lives in this fork
 src/core/ops/facts.ts	module_collection	1	W6: per-engine state, or mark as a constant table
 src/core/ops/files.ts	fs_import	1	W7: filesystem boundary moves to the local app
+src/core/ops/lumenix-typesafe.ts	spawn_import	1	lumenix fork: docker exec into the openclaw container runs the external selector/judge; stays while the op lives in this fork
 src/core/ops/schema-packs.ts	fs_import	2	W7: filesystem boundary moves to the local app
 src/core/ops/skillopt.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/output/post-write.ts	fs_import	1	W7: filesystem boundary moves to the local app

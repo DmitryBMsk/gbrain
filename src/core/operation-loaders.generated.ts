@@ -29,6 +29,8 @@ const load_insights = () => import('./ops/insights.ts') as Promise<Record<string
 const load_jobs = () => import('./ops/jobs.ts') as Promise<Record<string, unknown>>;
 const load_links = () => import('./ops/links.ts') as Promise<Record<string, unknown>>;
 const load_loops = () => import('./ops/loops.ts') as Promise<Record<string, unknown>>;
+const load_lumenix_evidence = () => import('./ops/lumenix-evidence.ts') as Promise<Record<string, unknown>>;
+const load_lumenix_typesafe = () => import('./ops/lumenix-typesafe.ts') as Promise<Record<string, unknown>>;
 const load_memory_settings = () => import('./ops/memory-settings.ts') as Promise<Record<string, unknown>>;
 const load_notices = () => import('./ops/notices.ts') as Promise<Record<string, unknown>>;
 const load_orphans = () => import('./ops/orphans.ts') as Promise<Record<string, unknown>>;
@@ -64,6 +66,8 @@ const load_whois = () => import('./ops/whois.ts') as Promise<Record<string, unkn
 const load_verbs = () => import('./verbs.ts') as Promise<Record<string, unknown>>;
 
 export const OPERATION_LOADERS: Record<string, readonly [() => Promise<Record<string, unknown>>, string]> = {
+  "suggest_skill": [load_lumenix_typesafe, "typesafeOperations"],
+  "pack_evidence": [load_lumenix_evidence, "evidenceOperations"],
   "remember": [load_verbs, "verbOperations"],
   "entity": [load_verbs, "verbOperations"],
   "synthesize": [load_verbs, "verbOperations"],

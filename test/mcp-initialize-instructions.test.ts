@@ -14,6 +14,7 @@ import { operations } from '../src/core/operations.ts';
 import { filterOpsForSurface } from '../src/mcp/surface.ts';
 import { buildMcpInstructions, GBRAIN_MCP_INSTRUCTIONS, installInstructionsResolver } from '../src/mcp/instructions.ts';
 import type { ReadinessEntry } from '../src/core/readiness.ts';
+import { lumenixClauseBytes } from './helpers/lumenix-instructions.ts';
 
 const SURFACES = ['verbs', 'starter', 'full'] as const;
 const OP_NAMES = operations.map(o => o.name);
@@ -114,9 +115,9 @@ describe('F1 generated instructions', () => {
     for (const surface of SURFACES) {
       const listed = new Set(filterOpsForSurface(operations, surface).map(o => o.name));
       const size = buildMcpInstructions({ tools: { callable: n => listed.has(n) } }).length;
-      expect({ surface, fits: size <= recorded[surface] }).toEqual({ surface, fits: true });
+      expect({ surface, fits: size <= recorded[surface] + lumenixClauseBytes(n => listed.has(n)) }).toEqual({ surface, fits: true });
       const max = buildMcpInstructions({ tools: { callable: n => listed.has(n) }, references: { namesRow: true, records: true } }).length;
-      expect({ surface, fits: max <= maximal[surface] }).toEqual({ surface, fits: true });
+      expect({ surface, fits: max <= maximal[surface] + lumenixClauseBytes(n => listed.has(n)) }).toEqual({ surface, fits: true });
     }
   });
 
@@ -134,14 +135,14 @@ describe('F1 generated instructions', () => {
     expect(text).toContain('worker missing: 3 jobs');
     expect(text).not.toContain('keyless by choice');
     expect(text).not.toContain('Schema is behind');
-    expect(Buffer.byteLength(text) - PRE_F1_BYTES).toBeLessThanOrEqual(1200 + WRITING_CLAUSE_BYTES + CONVERSATION_SWITCH_CLAUSE_BYTES);
+    expect(Buffer.byteLength(text) - PRE_F1_BYTES).toBeLessThanOrEqual(1200 + WRITING_CLAUSE_BYTES + CONVERSATION_SWITCH_CLAUSE_BYTES + lumenixClauseBytes());
   });
 
   for (const surface of SURFACES) {
     test(`${surface}: tail-free contract stays within +15% of the pre-F1 contract`, () => {
       const listed = new Set(filterOpsForSurface(operations, surface).map(o => o.name));
-      expect(Buffer.byteLength(buildMcpInstructions({ tools: { callable: n => listed.has(n) } }))).toBeLessThanOrEqual(LANE_I_CEILING);
-      expect(Buffer.byteLength(buildMcpInstructions({ tools: { callable: n => listed.has(n) }, references: { namesRow: true, records: true } }))).toBeLessThanOrEqual(LANE_I_CEILING);
+      expect(Buffer.byteLength(buildMcpInstructions({ tools: { callable: n => listed.has(n) } }))).toBeLessThanOrEqual(LANE_I_CEILING + lumenixClauseBytes(n => listed.has(n)));
+      expect(Buffer.byteLength(buildMcpInstructions({ tools: { callable: n => listed.has(n) }, references: { namesRow: true, records: true } }))).toBeLessThanOrEqual(LANE_I_CEILING + lumenixClauseBytes(n => listed.has(n)));
     });
   }
 

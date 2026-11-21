@@ -29,7 +29,7 @@ import { parseRescopeTokenArgs, rescopeLegacyToken } from '../src/core/grants/le
 import { dispatchToolCall, type ToolResult } from '../src/mcp/dispatch.ts';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
 import { RateLimiter } from '../src/mcp/rate-limit.ts';
-import { GBRAIN_MCP_INSTRUCTIONS, MCP_SERVER_DESCRIPTION } from '../src/mcp/instructions.ts';
+import { MCP_SERVER_DESCRIPTION } from '../src/mcp/instructions.ts';
 import { __resetPrivateVisibilityCacheForTests, withCallerAccess } from '../src/core/search/private-visibility.ts';
 import { addMember, bindCredential, disableMember, enableMember, setMemberEmail } from '../src/core/access/members.ts';
 import { ACTOR_DEFERRED_OPS, attestedCallerAccess, linkMember, linkMemberByEmail, listMemberLinks, parseAttestOps, unlinkMember } from '../src/core/access/actor.ts';
@@ -43,6 +43,7 @@ import type { AuthInfo, OperationContext } from '../src/core/ops/contract.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { upstreamInstructions } from './helpers/lumenix-instructions.ts';
 
 const DIMS = 1536;
 function vectorFor(text: string): number[] {
@@ -575,6 +576,6 @@ describe('serverInfo.description (GST-359 item 6)', () => {
     expect(MCP_SERVER_DESCRIPTION).toContain('gbrain');
     expect(MCP_SERVER_DESCRIPTION).toContain('remember');
     // GBRA-219 (#7795): the memory_conversation_mode switch clause is the only change to the instructions since this pin.
-    expect(createHash('sha256').update(GBRAIN_MCP_INSTRUCTIONS).digest('hex')).toBe('5164ac196ce534a6fd981895b8566fa85c7c1567025096f47ba19678f934bf65');
+    expect(createHash('sha256').update(upstreamInstructions()).digest('hex')).toBe('5164ac196ce534a6fd981895b8566fa85c7c1567025096f47ba19678f934bf65');
   });
 });

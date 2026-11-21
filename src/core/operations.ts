@@ -1,3 +1,5 @@
+import { typesafeOperations } from './ops/lumenix-typesafe.ts';
+import { evidenceOperations } from './ops/lumenix-evidence.ts';
 /**
  * Contract-first operation definitions. Single source of truth for CLI, MCP, and tools-json.
  * Each operation defines its schema, handler, and optional CLI hints.
@@ -145,6 +147,8 @@ export { parseTtlParam } from './ops/facts.ts';
 export { __resetRequestToolsPersistLimiterForTests } from './ops/request-tools.ts';
 
 export const operations: Operation[] = [
+  ...typesafeOperations,
+  ...evidenceOperations,
   // MEMORY_VERBS v1 (Cathedral 1) — remember/entity/synthesize/forget live in
   // verbs.ts; the remaining three of the seven verbs (the extended `recall`,
   // plus the v0.45.x boundary verbs `context_pack`/`delta`) are defined below.

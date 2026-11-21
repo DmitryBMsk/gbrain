@@ -142,6 +142,9 @@ const SWEEP: Record<string, Row> = {
   search: { args: { query: 'PLANTMARK note body', limit: 20 } },
   query: { args: { query: 'PLANTMARK note body', limit: 20 } },
   search_exact: { args: { phrase: 'PLANTMARK' } },
+  // Lumenix ops: stored text returns only through the external judge/selector (docker exec), absent here; the search path is test/lumenix-evidence.test.ts.
+  pack_evidence: { args: { question: 'PLANTMARK note body', sensitive: true }, content: false },
+  suggest_skill: { args: { request: 'sweep', roster: [], sensitive: true } },
   whois: { args: { query: planted('person') } },
   assemble_evidence: { args: { hits: [{ source_id: SRC, slug: 'notes/n1', chunk_id: 0 }], return_unit: 'page' } },
   search_by_image: { skip: 'needs image-embedding infra; cross-modal suites own it. Wrapper coverage is the registration test below.' },

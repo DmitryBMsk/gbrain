@@ -62,6 +62,7 @@ import { buildToolDefs } from '../src/mcp/tool-defs.ts';
 import { stdioVisibleTools } from '../src/mcp/server.ts';
 import { buildMcpInstructions, GBRAIN_MCP_INSTRUCTIONS } from '../src/mcp/instructions.ts';
 import { cl100kAvailable, estimateTokens } from '../src/core/chunkers/token-estimate.ts';
+import { lumenixClauseBytes } from './helpers/lumenix-instructions.ts';
 
 const SERVED_STARTER_MAX_CHARS = 18_971; // GBRA-217: +120 for get_page `as_of` on starter (decision 9: valid-time reads for delegating agents; `reason` moved to the full surface to pay part of it); GST-927: +100 for get_page's one-window-selector rule (GPT-6.1 Sol sent lines, bytes and around_chunk_id together on 436 of 607 recorded calls); get_page's own text paid 3; GBRA-219 (#7795, GBRA-108 decision A): memory_conversation_mode joins starter (the per-conversation save switch, approved in the GBRA-219 plan), its description and the instructions clause trimmed first: +407 (18,507 served, 200 headroom kept); 18,609 served on the train (headroom 218); GST-2243 (approved option A): remember `share` on starter so a member can share a fact with the team, tool-description sentence dropped to pay part of it: +144 (18,771 served, 200 headroom kept)
 /** Headroom the served starter list must keep under the ceiling (wave 16: 24,998 of 25,000 left 2 characters; 200 is what the wave reaches without touching text other threads own, raised to 300 once the entity card and query/search trims land). */
@@ -199,7 +200,7 @@ describe('served starter tool list (Cat 40 configuration)', () => {
   });
 
   test('initialize instructions stay at or below their recorded size', () => {
-    expect(GBRAIN_MCP_INSTRUCTIONS.length).toBeLessThanOrEqual(INSTRUCTIONS_MAX_CHARS);
+    expect(GBRAIN_MCP_INSTRUCTIONS.length).toBeLessThanOrEqual(INSTRUCTIONS_MAX_CHARS + lumenixClauseBytes());
   });
 
   // Per-arm renderings: all off (names-row off, no records, `newest`), names-row on / records off, F4 only
@@ -211,7 +212,7 @@ describe('served starter tool list (Cat 40 configuration)', () => {
         for (const records of [false, true]) {
           const size = buildMcpInstructions({ references: { namesRow, records }, governingRule }).length;
           max = Math.max(max, size);
-          expect({ governingRule, namesRow, records, fits: size <= INSTRUCTIONS_MAX_CHARS }).toEqual({ governingRule, namesRow, records, fits: true });
+          expect({ governingRule, namesRow, records, fits: size <= INSTRUCTIONS_MAX_CHARS + lumenixClauseBytes() }).toEqual({ governingRule, namesRow, records, fits: true });
         }
       }
     }
