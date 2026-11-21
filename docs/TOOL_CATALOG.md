@@ -278,7 +278,7 @@ Every non-localOnly operation on the MCP surface: 182 tools across 28 areas. **S
 | `list_skills` | Skills: prose instruction sets (NOT executable code) for tasks with this server's tools, with triggers, usable_tools and unavailable_tools. | read | yes | `mcp.publish_skills` |
 | `put_skill` | Publish a complete file-canonical skill revision with CAS and a durable receipt. | write + skill_editor | yes |  |
 | `set_skill_policy` | Explicitly approve a versioned shared-skill disclosure and follow policy. | admin + skill_publisher |  |  |
-| `suggest_skill` | TypeSafe advisory skill selection. | read |  |  |
+| `suggest_skill` | TypeSafe skill suggestion (non-binding). | read |  |  |
 | `sync_brain_skills` | Get a complete authorized shared-skills view and optionally record an own issued-batch delivery acknowledgment. | read + skills_member_self | yes |  |
 
 ## sources

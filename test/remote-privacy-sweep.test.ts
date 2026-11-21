@@ -162,6 +162,9 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   storage_get: { id: 'dataset-a' },
   storage_list: {},
   search: { query: 'WORLDSWEEP' },
+  // Lumenix fork ops: sensitive=true answers before any brain read or external call.
+  pack_evidence: { question: 'WORLDSWEEP', sensitive: true },
+  suggest_skill: { request: 'sweep', roster: [], sensitive: true },
   // 'SWEEP_' is inside every PRIVATE sentinel too: the literal scan must still return only world text.
   search_exact: { phrase: 'SWEEP_' },
   query: { query: 'WORLDSWEEP' },
@@ -298,6 +301,8 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   list_link_sources: 'ok',
   search_modes: 'ok',
   get_brain_identity: 'ok',
+  pack_evidence: 'ok', // lumenix fork: skipped_sensitive, no corpus read
+  suggest_skill: 'ok', // lumenix fork: skipped_sensitive, no corpus read
   whoami: 'ok', // base unused — per-shape override in EXPECTED_BY_SHAPE (above)
   sources_list: 'ok',
   sources_status: 'ok',

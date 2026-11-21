@@ -1,5 +1,4 @@
 // Testable pack_evidence wrapper. The hosted file imports this beside search.ts.
-import { execFile } from '../spawn.ts';
 
 type Result = {
   status: string;
@@ -18,17 +17,21 @@ let active = 0;
 
 const unavailable = (): Result => ({ status: 'unavailable', evidence: [], calls: 0, backends: {}, reason: 'unavailable' });
 
-export const runContainer: Runner = (input) => new Promise((resolve, reject) => {
-  const child = execFile('/usr/bin/docker', [
-    'exec', '-i', 'openclaw', 'python3',
-    '/home/node/.openclaw/workspace/skills/typesafe-ai/scripts/evidence_pack.py',
-  ], { timeout: 20000, maxBuffer: 200000, encoding: 'utf8' }, (err, stdout) => {
-    if (err) reject(new Error('evidence pack unavailable'));
-    else resolve(stdout);
+export const runContainer: Runner = async (input) => {
+  // Lazy per call: a module serving remote ops keeps child_process off its top level (operations-trust-boundary).
+  const { execFile } = await import('../spawn.ts');
+  return new Promise((resolve, reject) => {
+    const child = execFile('/usr/bin/docker', [
+      'exec', '-i', 'openclaw', 'python3',
+      '/home/node/.openclaw/workspace/skills/typesafe-ai/scripts/evidence_pack.py',
+    ], { timeout: 20000, maxBuffer: 200000, encoding: 'utf8' }, (err, stdout) => {
+      if (err) reject(new Error('evidence pack unavailable'));
+      else resolve(stdout);
+    });
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(input);
   });
-  child.stdin?.on('error', () => {});
-  child.stdin?.end(input);
-});
+};
 
 function text(value: unknown, limit: number): string {
   return typeof value === 'string' ? value.slice(0, limit) : '';
@@ -120,7 +123,9 @@ export function createEvidenceOperation(search: BrainSearch, runner: Runner = ru
       question: { type: 'string', required: true, description: 'Sanitized question, at most 2000 characters. No secrets, private documents, or full conversation.' },
       sensitive: { type: 'boolean', required: true, description: 'False only after removing private data from the question. True skips search and judgment.' },
     },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false },
+    mutating: false,
+    idempotent: true,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
     handler: async (ctx: { dryRun?: boolean }, p: Record<string, unknown>) => {
       const dry = ctx?.dryRun === true || p.dry_run === true;
       let raw: unknown = [];

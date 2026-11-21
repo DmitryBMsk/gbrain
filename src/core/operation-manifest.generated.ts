@@ -12,7 +12,7 @@ import type { OperationMeta } from './ops/contract.ts';
 export const OPERATION_MANIFEST: OperationMeta[] = [
   {
     "name": "suggest_skill",
-    "description": "TypeSafe advisory skill selection. Before a substantive task, send a sanitized task summary and the skills actually available to this agent. Returns at most one skill to read, or no_match/unavailable. Sends only supplied input to TypeSafe; never reads brain content or executes a skill. Explicit user choices and mandatory workflows take priority. Set sensitive=false only for sanitized input; otherwise skip external selection.",
+    "description": "TypeSafe skill suggestion (non-binding). Before a substantive task, send a sanitized task summary and the skills actually available to this agent. Returns at most one skill to read, or no_match/unavailable. Sends only supplied input to TypeSafe; never reads brain content or executes a skill. Explicit user choices and mandatory workflows take priority. Set sensitive=false only for sanitized input; otherwise skip external selection.",
     "area": "skills",
     "scope": "read",
     "outputRedaction": "no_stored_text",
@@ -36,10 +36,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "description": "False only after removing private data from request and roster. True skips external evaluation."
       }
     },
+    "mutating": false,
+    "idempotent": true,
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
-      "idempotentHint": false
+      "idempotentHint": true
     }
   },
   {
@@ -60,10 +62,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "description": "False only after removing private data from the question. True skips search and judgment."
       }
     },
+    "mutating": false,
+    "idempotent": true,
     "annotations": {
       "readOnlyHint": true,
       "destructiveHint": false,
-      "idempotentHint": false
+      "idempotentHint": true
     }
   },
   {

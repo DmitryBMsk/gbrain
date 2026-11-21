@@ -55,6 +55,9 @@ export const OP_READ_TRUST: Readonly<Record<string, ReadTrustHandling>> = {
   // Held at the unlisted default (refused under a token floor) pending a trust-posture call: it returns config-derived
   // settings and rule text, no stored memory text, so text_free would describe it but would admit floored connections.
   get_memory_settings: 'labeled',
+  // Lumenix fork ops: suggest_skill returns only names from the caller's roster; pack_evidence returns brain text
+  // through an external judge without a per-row floor, so a token-floored connection is refused.
+  suggest_skill: 'text_free', pack_evidence: 'labeled',
 };
 
 /** The class an op resolves to; an unlisted read op is held to the strictest (`labeled`) rule. */

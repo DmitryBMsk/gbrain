@@ -64,6 +64,8 @@ const CLASSIFIED: Record<string, Args | { skip: string }> = {
   search: { query: SENTINEL, source_ids: [SRC, PLAIN] },
   query: { query: SENTINEL, source_ids: [SRC, PLAIN] },
   assemble_evidence: { hits: [{ slug: GUEST, source_id: SRC }] },
+  // Lumenix fork: stored text returns only through the external judge (docker exec into the openclaw container), absent here.
+  pack_evidence: skip('lumenix fork: brain hits reach the caller only via the external judge, which tests cannot run'),
   search_exact: { phrase: SENTINEL },
   search_by_image: skip('searches image pages by an image; a guest note has no image'),
   get_links: { slug: GUEST },
