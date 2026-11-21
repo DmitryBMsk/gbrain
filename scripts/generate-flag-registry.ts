@@ -230,6 +230,7 @@ function facadeExpansion(p: string): string[] {
       // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- build-time generator over this repository's own source tree; every joined segment is a constant module name or a path the generator itself discovered under ROOT
       ...peeledHandlers.map(f => join(ROOT, 'src/core/minions/handlers', f)).filter(p => existsSync(p)),
       ...collect(join(ROOT, 'src/commands/jobs')),
+      join(ROOT, 'src/commands/jobs-drain.ts'),
     ];
   }
   if (rel === 'src/commands/autopilot.ts') {

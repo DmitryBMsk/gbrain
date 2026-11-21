@@ -48,11 +48,12 @@ export const FACTS_ABSORB_KEYLESS_RETRY_MS = 30 * 60_000;
 /** The lead of a segmented page that the backstop's eligibility reads. */
 const FACTS_ABSORB_LEAD_CHARS = 8_000;
 
-export function makeFactsAbsorbHandler(engine: BrainEngine): MinionHandler {
+export function makeFactsAbsorbHandler(engine: BrainEngine, factsAbsorbModel?: string): MinionHandler {
   const handle: MinionHandler = async (job) => {
     const slug = typeof job.data.slug === 'string' ? job.data.slug : '';
     if (!slug) throw new Error('facts-absorb job requires data.slug');
     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : 'default';
+    const jobModel = factsAbsorbModel ?? (typeof job.data.model === 'string' && job.data.model ? job.data.model : undefined);
     const { readFactsBackstopJobPage } = await import('../../persistence/effect-facts.ts');
     const input = await readFactsBackstopJobPage(engine, job.data);
     if ('skipped' in input) return { skipped: input.skipped, slug, sourceId };
@@ -77,7 +78,7 @@ export function makeFactsAbsorbHandler(engine: BrainEngine): MinionHandler {
         await assertLegacyFilesystemWriter(engine, source.local_path).catch(refuse);
       }
     }
-    const { runFactsBackstop, coerceNotabilityFilter } = await import('../../facts/backstop.ts');
+    const { runFactsBackstop, coerceNotabilityFilter, classifyUnavailable } = await import('../../facts/backstop.ts');
     const KNOWN_SOURCES = ['sync:import', 'mcp:put_page', 'mcp:extract_facts', 'file_upload', 'code_import', 'hook:writeback'] as const;
     const source = (KNOWN_SOURCES as readonly string[]).includes(job.data.source as string)
       ? (job.data.source as typeof KNOWN_SOURCES[number])
@@ -103,7 +104,7 @@ export function makeFactsAbsorbHandler(engine: BrainEngine): MinionHandler {
         mode: 'inline',
         notabilityFilter: coerceNotabilityFilter(job.data.notabilityFilter),
         visibility: job.data.visibility === 'world' ? 'world' : 'private',
-        ...(typeof job.data.model === 'string' && job.data.model ? { model: job.data.model } : {}),
+        ...(jobModel ? { model: jobModel } : {}),
         abortSignal: job.signal,
         deadlineAtMs: job.deadlineAtMs,
       },
@@ -120,8 +121,6 @@ export function makeFactsAbsorbHandler(engine: BrainEngine): MinionHandler {
     // classification runs in the WORKER process (the submitting hook
     // subprocess may have a deliberately neutered env).
     if (factsAbsorbUnavailable(result)) {
-      const { classifyUnavailable } = await import('../../facts/backstop.ts');
-      const jobModel = typeof job.data.model === 'string' && job.data.model ? job.data.model : undefined;
       if (factsAbsorbShouldRetry(result, await classifyUnavailable(jobModel))) {
         const { FactsExtractionError } = await import('../../facts/extract.ts');
         throw new FactsExtractionError('chat_unavailable', jobModel);

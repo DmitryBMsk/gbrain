@@ -45,6 +45,7 @@ test/access-token-grant-columns.test.ts
 test/access-ungranted-member-writes.test.ts
 test/access-writes.test.ts
 test/activation-unbound-rooted-6449.test.ts
+test/admin-fact-review.test.ts
 test/adopt-local-edit.test.ts
 test/alias-source-cascade-5094.test.ts
 test/atom-retirement-keeps-trust-9456.test.ts

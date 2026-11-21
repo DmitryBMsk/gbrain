@@ -79,7 +79,7 @@ export const READER_ALIASES: Readonly<Record<string, string>> = { repos: 'source
  * exact tokens.
  */
 export const OWN_EQUALS_PARSERS: ReadonlySet<string> = new Set([
-  'append', 'auth local-writer', 'eval longmemeval', 'git', 'google attachments', 'migrate embeddings', 'repair', 'retrieval-upgrade', 'schema add-type', 'skillpack remove',
+  'append', 'auth local-writer', 'eval longmemeval', 'git', 'google attachments', 'jobs drain', 'migrate embeddings', 'repair', 'retrieval-upgrade', 'schema add-type', 'skillpack remove',
   'sources connect', 'sources inspect', 'sources reconcile', 'sources reset-upstream', 'sources writer',
   'takes add', 'takes remove', 'takes resolve', 'takes supersede', 'takes update',
 ]);

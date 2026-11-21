@@ -2429,6 +2429,12 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
       }
       refuseThinClient('jobs', cfgJobs!.remote_mcp!.mcp_url);
     }
+    // Validate before connecting. Only an unblocked --yes run uses the full boot.
+    if (args[0] === 'drain') {
+      const { runJobsDrainCli } = await import('../commands/jobs.ts');
+      await runJobsDrainCli(args, { probe: () => connectEngine({ probeOnly: true }), full: () => connectEngine() });
+      return null;
+    }
     if (args[0] === 'supervisor' && args[1] === 'status') {
       const { DEFAULT_PID_FILE } = await import('../core/minions/supervisor.ts');
       const { readSupervisorPid } = await import('../core/minions/supervisor-pid.ts');

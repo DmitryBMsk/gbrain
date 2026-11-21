@@ -251,6 +251,9 @@ test/import-source-cr-mode.serial.test.ts	global-state	global-state: process-wid
 test/init-search-mode.serial.test.ts	global-state	global-state: spawns real gbrain init/config CLI children against PGLite datastores in temp homes (180 s budget each)
 test/internal-breadth-callers.serial.test.ts	R2	R2: mock.module(../src/core/search/hybrid.ts) replaces modules for every file in the process
 test/jobs-child-readiness.serial.test.ts	global-state	global-state: spyOn console.error
+test/jobs-drain-cli.serial.test.ts	global-state	global-state: R3: opens an on-disk PGLite brain between real CLI subprocesses
+test/jobs-drain-process-bound.serial.test.ts	global-state	global-state: spawns Bun children with live timers to test forced process exit against a deadline
+test/mem01-pilot-bounds-cli.serial.test.ts	global-state	global-state: R3: opens an on-disk PGLite brain between real CLI subprocesses
 test/jobs-embed-background-dryrun.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
 test/jobs-embed-background-parity.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
 test/jobs-embed-stall-wiring.serial.test.ts	R2	R2: mock.module(../src/commands/embed.ts) replaces modules for every file in the process

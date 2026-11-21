@@ -1142,7 +1142,7 @@
         "preConnectRules": [
           {
             "condition": "command === 'jobs'",
-            "connectsEngine": false,
+            "connectsEngine": true,
             "refusesThinClient": true,
             "routesThinClient": true,
             "terminates": false,

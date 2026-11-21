@@ -52,6 +52,7 @@ import { runJobsRunChild } from './jobs/run-child.ts';
 import { runJobsWork } from './jobs/work.ts';
 import { runJobsSupervisor } from './jobs/supervisor.ts';
 import { runJobsWatch } from './jobs/watch.ts';
+import { DRAIN_HELP, runJobsDrainCli } from './jobs-drain.ts';
 import type { JobsCommandContext } from './jobs/shared.ts';
 import { withLocalScope } from '../core/engine-scope-store.ts';
 
@@ -70,6 +71,7 @@ export {
   type JobIsolationMode,
 } from './jobs/shared.ts';
 export { maybeRunWorkerStartupRecovery } from './jobs/work.ts';
+export { runJobsDrainCli };
 
 /**
  * Long-lived workers outlive operator config changes. Re-stamp the AI gateway
@@ -180,6 +182,7 @@ USAGE
   gbrain jobs stats [--queue Q] [--cluster-errors] [--json]
                     (dream-inline-* queues report ABANDONED/live only with an
                      explicit --queue; use \`gbrain doctor\` to discover them)
+  gbrain jobs drain facts-absorb --max-jobs N --max-usd X [--max-runtime-min M] [--model P:M] [--yes] [--json]
   gbrain jobs smoke [--sigkill-rescue] [--wedge-rescue]
   gbrain jobs watch [--json] [--follow] [--refresh-ms=N]
   gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
@@ -248,7 +251,7 @@ HANDLER TYPES (built in)
                     GBRAIN_ALLOW_SHELL_JOBS=1) on the worker. Params: {cmd?,
                     argv?, cwd, env?}. See: docs/guides/minions-shell-jobs.md
 
-Detailed help: gbrain jobs {work|supervisor|submit|watch|prune} --help
+Detailed help: gbrain jobs {work|supervisor|submit|watch|prune|drain} --help
 Other subcommands are fully described above.
 `;
 
@@ -260,6 +263,7 @@ Other subcommands are fully described above.
  * without an entry fall back to JOBS_HELP, which documents them fully.
  */
 const JOBS_SUBCOMMAND_HELP: Record<string, string> = {
+  drain: DRAIN_HELP,
   work: `gbrain jobs work — start a worker daemon (PGLite: drain the queue and exit)
 
 USAGE
@@ -457,6 +461,7 @@ const JOBS_SUBCOMMANDS: Record<string, (ctx: JobsCommandContext) => Promise<void
   delete: runJobsDelete,
   prune: runJobsPrune,
   stats: runJobsStats,
+  drain: ({ args, engine }) => runJobsDrainCli(args, { probe: async () => engine, full: async () => engine, owned: false }),
   smoke: runJobsSmoke,
   'child-readiness': runJobsChildReadiness,
   'run-child': runJobsRunChild,
@@ -532,7 +537,7 @@ async function runJobsCommand(engineOrNull: BrainEngine | null, args: string[]):
 export async function registerBuiltinHandlers(
   worker: MinionWorker,
   engine: BrainEngine,
-  opts?: { quiet?: boolean },
+  opts?: { quiet?: boolean; factsAbsorbModel?: string },
 ): Promise<void> {
   // `quiet` suppresses the informational startup stderr lines. The supervisor
   // (issue #1801) runs this against a throwaway worker purely to read
@@ -553,7 +558,7 @@ export async function registerBuiltinHandlers(
   worker.register('import', makeImportHandler(engine));
   worker.register('extract', makeExtractHandler(engine));
   worker.register('backlinks', makeBacklinksHandler(engine));
-  registerBuiltinJob(worker, engine, 'facts-absorb', withFactsAbsorbHaltCooldown(makeFactsAbsorbHandler(engine)));
+  registerBuiltinJob(worker, engine, 'facts-absorb', withFactsAbsorbHaltCooldown(makeFactsAbsorbHandler(engine, opts?.factsAbsorbModel)));
 
   // v0.40.3.0: per-page contextual retrieval re-embed handler. PROTECTED
   // name (src/core/minions/protected-names.ts) — MCP/OAuth callers can't

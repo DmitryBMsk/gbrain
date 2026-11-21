@@ -290,6 +290,15 @@
         "<inline>"
       ],
       "method": "get",
+      "path": "/admin/api/facts-absorb/review",
+      "when": []
+    },
+    {
+      "handlers": [
+        "requireAdmin",
+        "<inline>"
+      ],
+      "method": "get",
       "path": "/admin/api/calibration/pattern/:id",
       "when": []
     },

@@ -15,6 +15,7 @@ src/cli/main.ts	formatResult	field	STREAM	renders a get_page result body; segmen
 src/cli/page-render.ts	asOfExitCode	field	NONE	not the page body: tests whether a get_page as_of reply carries compiled_truth (a wire result, not a Page); a segmented edition replies with window, tested first
 src/cli/page-render.ts	formatGetPage	call:serializeMarkdown	SEGW	
 src/cli/page-render.ts	formatGetPage	field	STREAM	
+src/commands/admin-fact-review.ts	readSource	field	STREAM	lumenix fork: owner-only facts-absorb review reads the source revision body; a segmented page throws page_body_segmented and the review answers 503 (fail-closed)
 src/commands/brainstorm.ts	runBrainstormCli	call:serializeMarkdown	SEGW	
 src/commands/core.ts	runCore	field	INLINE	
 src/commands/core.ts	setMarking	call:serializePageToMarkdown	INLINE	

@@ -5,16 +5,17 @@ import { AgentsPage } from './pages/Agents';
 import { RequestLogPage } from './pages/RequestLog';
 import { CalibrationPage } from './pages/Calibration';
 import { JobsWatchPage } from './pages/JobsWatch';
+import { FactReviewPage } from './pages/FactReview';
 import { OAuthConsentPage } from './pages/OAuthConsent';
 import { pendingOAuthRequest } from './lib/oauth-request';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'oauth-consent';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'fact-review' | 'oauth-consent';
 
 function getPage(): Page {
   const hash = window.location.hash.replace('#', '') || 'dashboard';
   if (pendingOAuthRequest() && hash === 'dashboard') return 'oauth-consent';
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'oauth-consent'].includes(hash)) return hash as Page;
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'fact-review', 'oauth-consent'].includes(hash)) return hash as Page;
   return 'dashboard';
 }
 
@@ -63,6 +64,8 @@ export function App() {
              onClick={() => navigate('calibration')}>Calibration</a>
           <a className={`nav-item ${page === 'jobs' ? 'active' : ''}`}
              onClick={() => navigate('jobs')}>Jobs Watch</a>
+          <a className={`nav-item ${page === 'fact-review' ? 'active' : ''}`}
+             onClick={() => navigate('fact-review')}>Fact Review</a>
         </div>
         <div style={{ marginTop: 'auto', padding: '16px 12px', borderTop: '1px solid var(--border)' }}>
           <button
@@ -89,6 +92,7 @@ export function App() {
         {page === 'log' && <RequestLogPage />}
         {page === 'calibration' && <CalibrationPage />}
         {page === 'jobs' && <JobsWatchPage />}
+        {page === 'fact-review' && <FactReviewPage />}
         {page === 'oauth-consent' && <OAuthConsentPage />}
       </main>
     </div>

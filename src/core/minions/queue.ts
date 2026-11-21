@@ -1459,9 +1459,10 @@ export class MinionQueue {
   /** `excludeWatchdogSuspects`: a worker with jobs in flight never claims a job marked by a shared watchdog drain (watchdog-attribution.ts).
    *  `suspectWaitMs` (GST-2529): once a marked job this worker could claim has waited that long since its requeue, a worker with
    *  jobs in flight claims nothing, so it drains, and one with nothing in flight takes that job first, so it runs alone and soon.
-   *  `excludeNames`: skip these job names (the worker's long-job lane reservation, lanes.ts). */
-  async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], opts: { excludeWatchdogSuspects?: boolean; suspectWaitMs?: number; excludeNames?: string[] } = {}): Promise<MinionJob | null> {
-    if (registeredNames.length === 0) return null;
+   *  `excludeNames`: skip these job names (the worker's long-job lane reservation, lanes.ts).
+   *  `jobIds`: restrict the claim to these ids, including an empty selection. */
+  async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], opts: { excludeWatchdogSuspects?: boolean; suspectWaitMs?: number; excludeNames?: string[]; jobIds?: readonly number[] } = {}): Promise<MinionJob | null> {
+    if (registeredNames.length === 0 || opts.jobIds?.length === 0) return null;
     await assertNoUnreviewedJobs(this.engine);
 
     // Direct (session-mode) pool: claim opens the lock that renewLock then
@@ -1484,8 +1485,9 @@ export class MinionQueue {
     const param = (value: unknown) => `$${params.push(value)}`;
     const mark = opts.excludeWatchdogSuspects || opts.suspectWaitMs !== undefined ? param(WATCHDOG_SUSPECT_MARK) : '';
     const overdue = opts.suspectWaitMs === undefined ? null : overdueSuspectSql(mark, param(opts.suspectWaitMs));
+    const ids = opts.jobIds === undefined ? '' : param([...opts.jobIds]);
     const suspects = !opts.excludeWatchdogSuspects ? '' : ` AND ${unmarkedJobSql(mark)}${overdue ? ` AND NOT EXISTS (SELECT 1 FROM minion_jobs s WHERE s.queue = $3
-           AND s.status = 'waiting' AND s.submission_authority IS NOT NULL AND s.name = ANY($4) AND ${overdue})` : ''}`;
+           AND s.status = 'waiting' AND s.submission_authority IS NOT NULL AND s.name = ANY($4)${ids ? ` AND s.id = ANY(${ids}::bigint[])` : ''} AND ${overdue})` : ''}`;
     const names = excludeNames ? ` AND NOT (name = ANY(${param(excludeNames)}))` : '';
     const rows = await this.engine.executeRawDirect<Record<string, unknown>>(
       `UPDATE minion_jobs SET
@@ -1506,7 +1508,7 @@ export class MinionQueue {
         updated_at = now()
        WHERE id = (
          SELECT id FROM minion_jobs
-         WHERE queue = $3 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($4)${suspects}${names}
+         WHERE queue = $3 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($4)${suspects}${names}${ids ? ` AND id = ANY(${ids}::bigint[])` : ''}
          ORDER BY ${overdue && !opts.excludeWatchdogSuspects ? `${overdue} DESC, ` : ''}priority ASC, created_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
@@ -1519,12 +1521,12 @@ export class MinionQueue {
 
   /** GST-2529: whether a marked job this worker could claim has waited `suspectWaitMs` since its requeue. The worker asks at most every
    *  few seconds and passes `suspectWaitMs` to `claim` only when one has, so a claim with no such job keeps the claim index's order. */
-  async hasOverdueWatchdogSuspect(queue: string, registeredNames: string[], suspectWaitMs: number): Promise<boolean> {
-    if (registeredNames.length === 0) return false;
+  async hasOverdueWatchdogSuspect(queue: string, registeredNames: string[], suspectWaitMs: number, jobIds?: readonly number[]): Promise<boolean> {
+    if (registeredNames.length === 0 || jobIds?.length === 0) return false;
     const rows = await this.engine.executeRaw<{ overdue: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM minion_jobs WHERE queue = $1 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($2)
-         AND ${overdueSuspectSql('$3', '$4')}) AS overdue`,
-      [queue, registeredNames, WATCHDOG_SUSPECT_MARK, suspectWaitMs],
+         AND ${overdueSuspectSql('$3', '$4')}${jobIds === undefined ? '' : ' AND id = ANY($5::bigint[])'}) AS overdue`,
+      [queue, registeredNames, WATCHDOG_SUSPECT_MARK, suspectWaitMs, ...(jobIds === undefined ? [] : [[...jobIds]])],
     );
     return rows[0]?.overdue === true;
   }
@@ -2160,6 +2162,34 @@ export class MinionQueue {
        RETURNING *`
     ));
     return rows.map(rowToMinionJob);
+  }
+
+  /**
+   * Scoped promotion for a bounded single-name consumer (`gbrain jobs drain`):
+   * moves at most `limit` DUE delayed rows of exactly one (queue, name) back to
+   * waiting — same column resets as promoteDelayed. Future delays, other
+   * names/queues and every non-delayed status are never touched. Returns ids. `jobIds` narrows like claim().
+   */
+  async promoteDueDelayed(opts: { queue: string; name: string; limit: number; jobIds?: readonly number[] }): Promise<number[]> {
+    const limit = Math.floor(opts.limit);
+    if (!Number.isFinite(limit) || limit <= 0 || opts.jobIds?.length === 0) return [];
+    await assertNoUnreviewedJobs(this.engine);
+    const rows = await this.lockRetry(() => this.engine.executeRaw<{ id: number }>(
+      // MATERIALIZED: the picked set is computed exactly once. An IN (subquery
+      // LIMIT … FOR UPDATE) may be re-evaluated and exceed the limit.
+      `WITH picked AS MATERIALIZED (
+         SELECT id FROM minion_jobs
+          WHERE queue = $1 AND name = $2 AND status = 'delayed' AND delay_until <= now()${opts.jobIds !== undefined ? ' AND id = ANY($4::bigint[])' : ''}
+          ORDER BY priority ASC, delay_until ASC, id ASC
+          LIMIT $3
+          FOR UPDATE SKIP LOCKED)
+       UPDATE minion_jobs j SET status = 'waiting', delay_until = NULL, started_at = NULL,
+         lock_token = NULL, lock_until = NULL, updated_at = now()
+         FROM picked WHERE j.id = picked.id AND j.status = 'delayed'
+       RETURNING j.id`,
+      [opts.queue, opts.name, limit, ...(opts.jobIds !== undefined ? [[...opts.jobIds]] : [])],
+    ));
+    return rows.map(r => Number(r.id));
   }
 
   /** Detect and handle stalled jobs. Single CTE, no off-by-one. Returns affected jobs. */

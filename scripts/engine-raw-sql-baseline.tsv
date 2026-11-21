@@ -9,6 +9,7 @@ src/commands/access-read-by-nobody.ts	execute_raw	2
 src/commands/access-rules.ts	execute_raw	4
 src/commands/access-serves.ts	execute_raw	8	came from master #9625 (shared company brains: owner setup, member keys), which landed after this ratchet was cut
 src/commands/access.ts	execute_raw	6
+src/commands/admin-fact-review.ts	execute_raw	1	lumenix fork: MEM-01 port keeps the owner-only fact projection scoped to the receipt IDs and job source.
 src/commands/agent-logs.ts	execute_raw	1
 src/commands/agent-register.ts	execute_raw	4
 src/commands/agent-register.ts	sql_template	8
@@ -195,6 +196,7 @@ src/commands/init-prefer-postgres.ts	execute_raw	5
 src/commands/init.ts	execute_raw	1
 src/commands/init.ts	sql_template	2
 src/commands/integrity.ts	execute_raw	1
+src/commands/jobs-drain.ts	execute_raw	1	lumenix fork: MEM-01 read-only drain counts scoped to the selected jobs
 src/commands/jobs-watch.ts	execute_raw	2
 src/commands/jobs/smoke.ts	execute_raw	2
 src/commands/jobs/stats.ts	execute_raw	5
@@ -469,7 +471,7 @@ src/core/extract/rollup-writer.ts	execute_raw	3
 src/core/extraction-lag.ts	execute_raw	2
 src/core/extraction-watermark.ts	execute_raw	5
 src/core/facts/absorb-log.ts	execute_raw	1
-src/core/facts/backstop.ts	execute_raw	1
+src/core/facts/backstop.ts	execute_raw	2	lumenix fork: MEM-01 exact observation lookup by source page context
 src/core/facts/bulk-days.ts	execute_raw	1
 src/core/facts/capture-dedup.ts	execute_raw	4
 src/core/facts/claim-conflicts.ts	execute_raw	3
@@ -634,7 +636,7 @@ src/core/minions/lease-pressure-audit.ts	execute_raw	3
 src/core/minions/legacy-cancel.ts	execute_raw	4
 src/core/minions/legacy-selection.ts	execute_raw	2
 src/core/minions/queue-families.ts	execute_raw	1
-src/core/minions/queue.ts	execute_raw	86
+src/core/minions/queue.ts	execute_raw	87	lumenix fork: MEM-01 scoped delayed-job promotion
 src/core/minions/rate-leases.ts	execute_raw	6
 src/core/minions/spend-authorization.ts	execute_raw	5
 src/core/minions/submission-authority.ts	execute_raw	7

@@ -36,12 +36,14 @@
 import { mkdirSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gbrainPath } from '../config.ts';
+import { canonicalLookup, canonicalReservationLookup, type ModelPricing } from '../model-pricing.ts';
 import { ANTHROPIC_PRICING } from '../anthropic-pricing.ts';
 import { EMBEDDING_PRICING } from '../embedding-pricing.ts';
 import { isoWeekFilename, resolveAuditDir } from '../audit-week-file.ts';
 import {
   canonicalPricingKey,
   isAllowedPricingOverrideKey,
+  overrideFor,
   reservationCostUsd,
   usageCostUsd,
   type BudgetKind,
@@ -213,6 +215,68 @@ export async function loadPricingOverrides(
   }
 }
 
+/** Result of the strict read a caller that pins one model prices with. */
+export type PinnedPricingOverrides =
+  | { status: 'ok'; overrides: PricingOverrides | undefined }
+  | { status: 'unreadable' | 'invalid' };
+
+/**
+ * Strict sibling of loadPricingOverrides for a caller that pins `modelId`:
+ * a read failure or an unusable document cannot prove the pinned model has
+ * no override, so it is reported (`unreadable` / `invalid`), never treated as
+ * absence. Unset or blank is a proven absence. `invalid` also covers an entry
+ * for the pinned model that the parser would drop, or more than one entry
+ * spelling it. Other models' entries keep the lenient parse. Returns status
+ * codes only — never the document.
+ */
+export async function loadPricingOverridesForModel(
+  engine: { getConfig(key: string): Promise<string | null> },
+  modelId: string,
+): Promise<PinnedPricingOverrides> {
+  let raw: string | null;
+  try {
+    raw = await engine.getConfig('pricing.overrides');
+  } catch {
+    return { status: 'unreadable' };
+  }
+  if (raw == null || raw.trim() === '') return { status: 'ok', overrides: undefined };
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { status: 'invalid' };
+  }
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) return { status: 'invalid' };
+  const overrides = parsePricingOverrides(doc);
+  const pinned = new Set([modelId.trim().toLowerCase(), canonicalPricingKey(modelId.trim()).toLowerCase()]);
+  const entries = Object.keys(doc).filter((k) => pinned.has(k.trim().toLowerCase())).length;
+  if (entries > 1 || (entries === 1 && overrideFor(modelId, overrides) === null)) return { status: 'invalid' };
+  return { status: 'ok', overrides };
+}
+
+/**
+ * True when an operator override for this chat model would REPLACE a
+ * canonical rate: it differs from the rate in effect at `at`, or it would
+ * mask a published later change (the reservation ceiling). The override
+ * still wins in every cost computation; this only lets a caller that pins a
+ * model surface the replacement as a preflight blocker instead of silently
+ * repricing. Models the canonical table does not price never conflict.
+ */
+export function pricingOverrideConflicts(
+  modelId: string,
+  overrides: PricingOverrides | undefined,
+  at: number = Date.now(),
+): boolean {
+  const override = overrideFor(modelId, overrides);
+  if (!override) return false;
+  const key = canonicalPricingKey(modelId.trim());
+  const current = canonicalLookup(key, at);
+  const ceiling = canonicalReservationLookup(key, at);
+  if (!current || !ceiling) return false;
+  const same = (p: ModelPricing) => p.input === override.input && p.output === override.output;
+  return !same(current) || !same(ceiling);
+}
+
 export class BudgetExhausted extends Error {
   readonly tag = 'BUDGET_EXHAUSTED' as const;
   reason: BudgetReason;
@@ -345,13 +409,19 @@ export class BudgetTracker {
   reserve(estimate: BudgetEstimate): BudgetReservation | undefined {
     this.assertRuntime(estimate.modelId);
 
-    const projected = reservationCostUsd(
-      estimate.modelId,
-      estimate.kind,
-      estimate.estimatedInputTokens,
-      estimate.maxOutputTokens,
-      this.opts.pricingOverrides,
-    );
+    const { modelId, kind, estimatedInputTokens, maxOutputTokens } = estimate;
+    const overrides = this.opts.pricingOverrides;
+    const key = canonicalPricingKey(modelId);
+    const at = Date.now();
+    const ceiling = kind === 'chat' && !overrideFor(modelId, overrides)
+      ? canonicalReservationLookup(key, at)
+      : undefined;
+    // A call may settle after a published price change. Use the ceiling only
+    // for this admission; actual usage still prices at settlement time.
+    const reservationRates = ceiling && ceiling !== canonicalLookup(key, at)
+      ? { [modelId.trim().toLowerCase()]: ceiling }
+      : overrides;
+    const projected = reservationCostUsd(modelId, kind, estimatedInputTokens, maxOutputTokens, reservationRates);
 
     if (projected === null) {
       if (this.opts.maxCostUsd !== undefined && this.capSource === 'user') {

@@ -8,8 +8,10 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 interface BrainFixture { url: string; ownerToken: string; loginLink: (oauthRequest?: string) => Promise<string> }
-export const test = base.extend<{}, { brain: BrainFixture }>({
-  brain: [async ({}, use) => {
+export const test = base.extend<{}, { brain: BrainFixture; brainSeed: string }>({
+  // Named synthetic seed applied by server.ts before serving; '' = empty brain.
+  brainSeed: ['', { scope: 'worker', option: true }],
+  brain: [async ({ brainSeed }, use) => {
     const directory = await mkdtemp(join(tmpdir(), 'gbrain-admin-browser-'));
     const listener = createServer();
     await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
@@ -23,6 +25,7 @@ export const test = base.extend<{}, { brain: BrainFixture }>({
     for (const key of ['PATH', 'SystemRoot', 'WINDIR', 'TMPDIR', 'TMP', 'TEMP']) if (process.env[key]) env[key] = process.env[key]!;
     Object.assign(env, { HOME: directory, GBRAIN_HOME: directory, GBRAIN_ADMIN_BOOTSTRAP_TOKEN: ownerToken,
       GBRAIN_TEST_HTTP_PORT: String(port), GBRAIN_TEST_HTTP_PUBLIC_URL: url, GBRAIN_SKIP_STARTUP_HOOKS: '1' });
+    if (brainSeed) env.GBRAIN_TEST_BROWSER_SEED = brainSeed;
     const child = spawn('bun', ['--no-env-file', fileURLToPath(new URL('./server.ts', import.meta.url))], {
       cwd: directory, env, stdio: ['ignore', 'pipe', 'pipe'],
     });

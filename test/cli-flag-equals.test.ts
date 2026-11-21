@@ -713,6 +713,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     const OWNERS: Record<string, string | null> = {
       'src/commands/company-brain-connect.ts': 'sources connect', 'src/commands/company-brain-inspect.ts': 'sources inspect',
       'src/commands/eval-longmemeval.ts': 'eval longmemeval', 'src/commands/git.ts': 'git', 'src/commands/persistence-admin.ts': 'auth local-writer',
+      'src/commands/jobs-drain.ts': 'jobs drain',
       'src/commands/repair.ts': 'repair', 'src/commands/schema-add-type.ts': 'schema add-type', 'src/commands/skillpack/harness.ts': 'skillpack remove',
       'src/commands/source-reconcile.ts': 'sources reconcile', 'src/commands/sources-reset-upstream.ts': 'sources reset-upstream',
       'src/commands/sources-writer-movement-cli.ts': 'sources writer', 'src/commands/takes-mutation.ts': 'takes add', 'src/commands/google-attachments.ts': 'google attachments',
@@ -724,6 +725,7 @@ describe('#7619 refusals that keep consent, scope and targets right', () => {
     const PARSER_OF: Record<string, string> = {
       append: 'src/cli/commands/append.ts', 'auth local-writer': 'src/commands/persistence-admin.ts', 'eval longmemeval': 'src/commands/eval-longmemeval.ts',
       git: 'src/commands/git.ts', 'google attachments': 'src/commands/google-attachments.ts', 'migrate embeddings': 'src/core/embedding-migration-cli.ts', 'retrieval-upgrade': 'src/core/embedding-migration-cli.ts',
+      'jobs drain': 'src/commands/jobs-drain.ts',
       repair: 'src/commands/repair.ts', 'schema add-type': 'src/commands/schema-add-type.ts', 'skillpack remove': 'src/commands/skillpack/harness.ts',
       'sources connect': 'src/commands/company-brain-connect.ts', 'sources inspect': 'src/commands/company-brain-inspect.ts',
       'sources reconcile': 'src/commands/source-reconcile.ts', 'sources reset-upstream': 'src/commands/sources-reset-upstream.ts',

@@ -471,6 +471,14 @@
             "<anonymous>"
           ],
           "method": "get",
+          "path": "/admin/api/facts-absorb/review"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
           "path": "/admin/api/calibration/pattern/:id"
         },
         {
@@ -1276,6 +1284,14 @@
           ],
           "method": "get",
           "path": "/admin/api/jobs/watch"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/facts-absorb/review"
         },
         {
           "handlers": [

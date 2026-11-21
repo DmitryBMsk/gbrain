@@ -363,18 +363,23 @@ function mountAdminOverviewApi(app: Express, ctx: ServeHttpContext): void {
     res.status(result.status).json(result.body);
   });
 
-  // v0.41 D2 — live jobs dashboard data. Shares readSnapshot() with the
-  // TTY `gbrain jobs watch` command so the two surfaces stay 1:1.
+  // Live jobs dashboard: readSnapshot() panels shared with TTY `jobs watch`, plus the fail-soft
+  // default-queue `health` block (get_job_stats wedge + get_status_snapshot worker definitions).
   app.get('/admin/api/jobs/watch', requireAdmin, async (_req: Request, res: Response) => {
     try {
-      const { readSnapshot } = await import('./jobs-watch.ts');
+      const [{ readSnapshot }, { readJobsWatchHealth }] = await Promise.all([import('./jobs-watch.ts'), import('./jobs-watch-health.ts')]);
       const snap = await readSnapshot(engine);
-      res.json(snap);
+      res.json({ ...snap, health: await readJobsWatchHealth(engine) });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
     }
   });
+  // Owner-only facts-absorb review: receipt facts (job source-scoped) beside their extraction-time source text.
+  app.get('/admin/api/facts-absorb/review', requireAdmin, async (req: Request, res: Response) => {
+    await (await import('./admin-fact-review.ts')).serveFactReview(engine, req, res);
+  });
+
 }
 
 function mountAdminCalibrationApi(app: Express, ctx: ServeHttpContext): void {

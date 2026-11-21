@@ -50,12 +50,14 @@ import type { ManagedFactsRefusal } from '../persistence/facts-maintenance.ts';
 import type { GBrainConfig } from '../config.ts';
 import { isAvailable } from '../ai/gateway.ts';
 import { withAIInvocationPreflight } from '../ai/invocation-guard.ts';
+import { onOwnedMemoryPageSql } from '../access/member-facts.ts';
 import { decideSingleFact } from './single-prepare.ts';
 import { cosineVerdict, dedupCapturedFacts, withCaptureDrops, wouldDedupSamePage } from './capture-dedup.ts';
 import { warnSamePageShadow } from './same-page-shadow.ts';
 import { readSupersessionThreshold } from './supersession-threshold.ts';
 import { assertAmbientCaptureAdmissible, type FactsBackstopSource } from './capture-sources.ts';
 import { appendContextNote, type InferredVia } from './subject-infer.ts';
+import { FEED_CONTRACT_INVALID_REASON, parseFeedContract, type FeedContract } from './source-contract.ts';
 import { inferenceNote, inferMissingSubjects } from './subject-infer-write.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import type { FactNotabilityFilter } from './notability-filter.ts';
@@ -213,6 +215,7 @@ interface PipelineInput {
   pageSlug?: string;
   /** When the text was written or said; null/undefined = unknown. */
   observationDate?: ObservationDate | null;
+  sourceContract?: FeedContract;
 }
 
 /** One page or turn pipeline run's counts (runPipelineWithBody). */
@@ -373,12 +376,14 @@ export async function runFactsBackstop(
   }
 
   const eligible = isFactsBackstopEligible(parsedPage.slug, parsedPage);
-  if (!eligible.ok) {
-    const skipped = `eligibility_failed:${eligible.reason}` as const;
+  const feed = eligible.ok ? parseFeedContract(parsedPage.frontmatter) : null;
+  if (!eligible.ok || feed?.status === 'invalid') {
+    const skipped = `eligibility_failed:${eligible.ok ? FEED_CONTRACT_INVALID_REASON : eligible.reason}` as const;
     return mode === 'queue'
       ? { mode: 'queue', enqueued: false, queueDepth: 0, skipped }
       : { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped };
   }
+  const sourceContract = feed?.status === 'ok' ? feed.contract : undefined;
   // Facts extracted from a private page stay private, whatever the caller or the brain default says.
   const { tightenToStoredPage } = await import('./visibility.ts');
   if (await tightenToStoredPage(ctx.engine, ctx.sourceId, 'world', parsedPage) === 'private') ctx = { ...ctx, visibility: 'private' };
@@ -389,7 +394,7 @@ export async function runFactsBackstop(
       throw opError('writer_coordinator_required', 'Managed page backstops must use the durable publication outbox.',
         `On a managed brain the publication outbox queues facts for ${parsedPage.slug ?? 'a page'}; a direct ${mode} backstop is a gbrain bug in its caller. The page write is unaffected. Report it with gbrain --version.`);
     }
-    return { mode: 'inline', ...await runPipeline(parsedPage, ctx, ctx.abortSignal) };
+    return { mode: 'inline', ...await runPipeline(parsedPage, ctx, ctx.abortSignal, sourceContract) };
   }
 
   // --- Extraction availability gate (engine-aware, EXECUTION-process only) ---
@@ -493,7 +498,7 @@ export async function runFactsBackstop(
       // increments only). Now they land in ingest_log so doctor +
       // dashboard surface failure modes per source.
       try {
-        await runPipeline(parsedPage, ctx, signal);
+        await runPipeline(parsedPage, ctx, signal, sourceContract);
       } catch (err) {
         const { writeFactsAbsorbFailure } = await import('./absorb-log.ts');
         await writeFactsAbsorbFailure(ctx.engine, parsedPage.slug, err, ctx.sourceId);
@@ -529,7 +534,7 @@ export async function runFactsBackstop(
   if (!inlineModel) {
     return { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped: 'extraction_unavailable' };
   }
-  const r = await runPipeline(parsedPage, { ...ctx, model: inlineModel }, ctx.abortSignal);
+  const r = await runPipeline(parsedPage, { ...ctx, model: inlineModel }, ctx.abortSignal, sourceContract);
   return { mode: 'inline', ...r };
 }
 
@@ -602,13 +607,15 @@ async function runPipeline(
   parsedPage: ParsedPageInput,
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
+  sourceContract?: FeedContract,
 ): Promise<PipelineResult & { input_truncated?: InputTruncated }> {
-  if (parsedPage.segmentedPageId !== undefined) return runSegmentedPipeline(parsedPage, parsedPage.segmentedPageId, ctx, abortSignal);
+  if (parsedPage.segmentedPageId !== undefined) return runSegmentedPipeline(parsedPage, parsedPage.segmentedPageId, ctx, abortSignal, sourceContract);
   // Large pages A7: past the watermark the extractor reads only the appended
   // tail; without a usable one it reads the head and the receipt says so.
   const { MAX_TURN_TEXT_CHARS } = await import('./extract.ts');
   const { pageId, stored } = await readPageWatermark(ctx.engine, ctx.sourceId, parsedPage.slug, 'facts_backstop');
-  const plan = planExtraction(parsedPage.compiled_truth, stored, { cap: MAX_TURN_TEXT_CHARS, pipeline: 'facts_backstop', emptyTail: 'skip' });
+  // A new feed observation can reuse an earlier body verbatim.
+  const plan = planExtraction(parsedPage.compiled_truth, sourceContract ? null : stored, { cap: MAX_TURN_TEXT_CHARS, pipeline: 'facts_backstop', emptyTail: 'skip' });
   if (!plan.text) return { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [] };
   const result = await runPipelineWithBody(
     {
@@ -619,6 +626,7 @@ async function runPipeline(
       // #4819: page provenance for DB-only rows. The turn-path entry
       // (runFactsPipeline) has no page, so it leaves this unset.
       pageSlug: parsedPage.slug,
+      sourceContract,
       observationDate: resolveObservationDate({ slug: parsedPage.slug, frontmatter: parsedPage.frontmatter }),
     },
     ctx,
@@ -632,13 +640,13 @@ async function runPipeline(
  * A segmented page (wave-b spec 8.2): the windows of its new occurrences only, newest first under the per-page spend
  * cap (backstop-segments.ts), each through the pipeline as its own turn; the window results summed.
  */
-async function runSegmentedPipeline(parsedPage: ParsedPageInput, pageId: number, ctx: FactsBackstopCtx, abortSignal?: AbortSignal): Promise<PipelineResult> {
+async function runSegmentedPipeline(parsedPage: ParsedPageInput, pageId: number, ctx: FactsBackstopCtx, abortSignal?: AbortSignal, sourceContract?: FeedContract): Promise<PipelineResult> {
   const observationDate = resolveObservationDate({ slug: parsedPage.slug, frontmatter: parsedPage.frontmatter });
   const { getFactsExtractionModel } = await import('./extract.ts');
   const { runSegmentedBackstop } = await import('./backstop-segments.ts');
   const { results } = await runSegmentedBackstop<PipelineResult>({ engine: ctx.engine, page: { id: pageId, body_storage: 'segmented' },
-    model: ctx.model ?? await getFactsExtractionModel(ctx.engine), observation: observationDate ? JSON.stringify(observationDate) : null, signal: abortSignal,
-    extract: text => runPipelineWithBody({ turnText: text, isDreamGenerated: false, ref: parsedPage.slug, pageSlug: parsedPage.slug, observationDate }, ctx, abortSignal) });
+    model: ctx.model ?? await getFactsExtractionModel(ctx.engine), observation: sourceContract ? JSON.stringify(sourceContract) : observationDate ? JSON.stringify(observationDate) : null, signal: abortSignal,
+    extract: text => runPipelineWithBody({ turnText: text, isDreamGenerated: false, ref: parsedPage.slug, pageSlug: parsedPage.slug, observationDate, sourceContract }, ctx, abortSignal) });
   const sum = (a?: number, b?: number) => a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
   return results.reduce<PipelineResult>((a, b) => ({
     inserted: a.inserted + b.inserted, duplicate: a.duplicate + b.duplicate, superseded: a.superseded + b.superseded,
@@ -793,6 +801,37 @@ export async function checkFactAgainstSaved(engine: BrainEngine, sourceId: strin
     ? { verdict: 'new', samePageShadow: { id: top.row.id, score: top.score } } : { verdict: 'new' };
 }
 
+/** Feed observations match exact text and page context, without cosine or fingerprint matching. */
+async function findExactBackstopDuplicate(
+  ctx: FactsBackstopCtx,
+  input: PipelineInput,
+  entitySlug: string | null,
+  fact: NewFact,
+  visibility: 'private' | 'world',
+): Promise<number | null> {
+  if (!input.sourceContract) {
+    const decision = await decideSingleFact(ctx.engine, ctx.sourceId, {
+      entity_slug: entitySlug, fact: fact.fact, kind: fact.kind ?? 'fact', visibility, attributed_to: fact.attributed_to ?? null,
+    }, null);
+    return decision.candidate?.id ?? null;
+  }
+  const [row] = await ctx.engine.executeRaw<{ id: number | string }>(
+    `SELECT id FROM facts f
+      WHERE source_id = $1
+        AND entity_slug IS NOT DISTINCT FROM $2::text
+        AND fact = $3
+        AND context IS NOT DISTINCT FROM $4::text
+        AND visibility = $5
+        AND NOT ${onOwnedMemoryPageSql('f')}
+        AND expired_at IS NULL
+        AND (valid_until IS NULL OR valid_until > now())
+      ORDER BY id
+      LIMIT 1`,
+    [ctx.sourceId, entitySlug, fact.fact, ctx.sourceSlug ?? input.pageSlug ?? null, visibility],
+  );
+  return row ? Number(row.id) : null;
+}
+
 /** The actual pipeline body — always runs inside a BudgetTracker scope (#4210). */
 async function runPipelineBodyInner(
   input: PipelineInput,
@@ -842,7 +881,7 @@ async function runPipelineBodyInner(
     engine: ctx.engine,
     abortSignal,
     model: ctx.model, ...(ctx.speaker ? { userSpeaker: ctx.speaker.principal } : {}),
-    notabilityAdmission, observationDate: input.observationDate ?? observationDateFrom(ctx.validFrom ?? ctx.turnAt ?? null),
+    notabilityAdmission, sourceContract: input.sourceContract, observationDate: input.observationDate ?? observationDateFrom(ctx.validFrom ?? ctx.turnAt ?? null),
     ...(managed ? { embedding: managed.embedding ?? null } : {}),
   });
   const outcome = managed ? await withAIInvocationPreflight(async call => {
@@ -879,14 +918,15 @@ async function runPipelineBodyInner(
   const { resolveDefaultVisibility } = await import('./visibility.ts');
   const visibility = ctx.visibility ?? (await resolveDefaultVisibility(ctx.engine));
   // #5888: one exact-duplicate check for the capture lanes, before either writer.
-  const { facts, dropped } = await dedupCapturedFacts(ctx, await inferMissingSubjects(ctx, ctx.speaker ? outcome.facts.map(f => asAgentSpoken(f)) : outcome.facts, visibility, input.pageSlug, managed), visibility, resolveEntitySlugWithSource);
+  const attributedFacts = ctx.speaker ? outcome.facts.map(asAgentSpoken) : outcome.facts;
+  const { facts, dropped } = input.sourceContract ? { facts: attributedFacts, dropped: [] }
+    : await dedupCapturedFacts(ctx, await inferMissingSubjects(ctx, attributedFacts, visibility, input.pageSlug, managed), visibility, resolveEntitySlugWithSource);
   if (!managed) await assertAmbientCaptureAdmissible(ctx.engine, ctx.source);
   if (managed) return withCaptureDrops(dropped, facts.length || !dropped.length ? await publishManagedFacts(ctx.engine, managed, ctx, facts, visibility, input.pageSlug, { withdrawn: 'skip' }) : null);
 
   const counts: PipelineCounts = { inserted: 0, duplicate: dropped.length, superseded: 0, fact_ids: [...dropped] };
   let wouldDedupSamePageCount = 0;
-  const writer = await derivedFactWriter(ctx, input, derivation, counts);
-  const { insertDerivedFact, write_gate } = writer;
+  const { insertDerivedFact, gateGroup, write_gate } = await derivedFactWriter(ctx, input, derivation, counts);
   // Cathedral 5: slugs whose fence-write actually inserted a fact this run.
   const fencedSlugs = new Set<string>();
   let fenceRefused = 0;
@@ -920,9 +960,8 @@ async function runPipelineBodyInner(
     // Dedup against DB candidates (correct per Codex Q7: fence rows
     // have no embeddings; FS lock + sync invariant means DB == fence
     // at write time). cosineVerdict: the model's calibrated threshold for explicit lanes; capture lanes never drop by cosine (#5888).
-    const exact = await decideSingleFact(ctx.engine, ctx.sourceId, { entity_slug: resolvedSlug, fact: f.fact, kind: f.kind ?? 'fact', visibility, attributed_to: f.attributed_to ?? null }, null);
-    let matchedExistingId: number | null = exact?.candidate?.id ?? null;
-    if (matchedExistingId === null && resolvedSlug && f.embedding && !f.entity_inferred) {
+    let matchedExistingId = await findExactBackstopDuplicate(ctx, input, resolvedSlug, f, visibility);
+    if (!input.sourceContract && matchedExistingId === null && resolvedSlug && f.embedding && !f.entity_inferred) {
       const candidates = await ctx.engine.findCandidateDuplicates(
         ctx.sourceId,
         resolvedSlug,
@@ -1044,7 +1083,7 @@ async function runPipelineBodyInner(
       source: f.source,
       // #4206: the caller's source_slug (which page/transcript the turn came
       // from) lands in the fence context cell — visible in recall projections.
-      context: withSpeakerNote(ctx.speaker, annotateUnverifiedResolution(ctx.sourceSlug ?? null, resolutionSource, f.entity_inferred)),
+      context: withSpeakerNote(ctx.speaker, annotateUnverifiedResolution(ctx.sourceSlug ?? (input.sourceContract ? input.pageSlug : null) ?? null, resolutionSource, f.entity_inferred)),
       visibility,
       confidence: f.confidence,
       // #4206: extractor-derived date wins; then the caller's event time
@@ -1055,7 +1094,7 @@ async function runPipelineBodyInner(
       sessionId: f.source_session ?? null,
     }));
     // #5575 B3: gate before the fence write; a held or rejected row reaches neither the fence nor a fallback below.
-    const { keptFacts, keep } = await writer.gateGroup(inputFacts, slug);
+    const { keptFacts, keep } = await gateGroup(inputFacts, slug);
     const kept = group.filter((_, i) => keep[i]);
     if (!keptFacts.length) continue;
 

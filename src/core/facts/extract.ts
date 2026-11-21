@@ -35,6 +35,7 @@ import type { BrainEngine, NewFact, FactKind, FactAttribution } from '../engine.
 import { normalizeExtractedMetricLabel } from './extract-from-fence.ts';
 import { isNullLikeEntity } from './write-single.ts';
 import { isAIInvocationPolicyError } from '../ai/invocation-guard.ts';
+import { SOURCE_CONTRACT_RULES, composeContractFact, renderContractBlock, type FeedContract } from './source-contract.ts';
 
 /**
  * v0.31 (D15): kill-switch for fact extraction.
@@ -303,6 +304,8 @@ export interface ExtractInput {
     allowed: readonly FactNotability[];
     invalid: 'drop';
   };
+  /** Validated producer feed metadata for source dates and subject attribution. */
+  sourceContract?: FeedContract;
 }
 
 /** A pre-INSERT fact ready for the engine.insertFact path. */
@@ -646,21 +649,26 @@ export async function extractFactsFromTurnWithOutcome(
   // because those reuse `extractorSystem`. Read AFTER the availability gate —
   // a chat_unavailable early return must not pay config round-trips (#4298
   // resolved the model/gate ordering; these reads sit behind it).
-  const [promptAppendix, junkFilterOn, missingConfidence, variant] = await Promise.all([
+  const [promptAppendix, junkFilterOn, missingConfidence, configuredVariant] = await Promise.all([
     getFactsExtractionPromptAppendix(input.engine),
     isJunkFilterEnabled(input.engine),
     getMissingConfidence(input.engine),
     input.variant ?? getExtractorVariant(input.engine),
   ]);
-  const extractorSystem = promptAppendix
-    ? `${buildExtractorSystem(admitsLow, variant)}\n\n${promptAppendix}`
-    : buildExtractorSystem(admitsLow, variant);
+  const contract = input.sourceContract;
+  // Lumenix fork: a source contract carries its own dates and subject, so contract pages keep the
+  // production prompt (no date-grounding or attribution blocks); the stored date comes from the contract.
+  const variant: ExtractorVariant = contract ? {} : configuredVariant;
+  const baseSystem = buildExtractorSystem(admitsLow, variant);
+  const contractSystem = contract ? `${baseSystem}\n\n${SOURCE_CONTRACT_RULES}` : baseSystem;
+  const extractorSystem = promptAppendix ? `${contractSystem}\n\n${promptAppendix}` : contractSystem;
+  const contractLine = contract ? `${renderContractBlock(contract)}\n` : '';
   const responseSchema = factsResponseSchema(variant);
   const dateLine = variant.dateGrounding ? `${observationDateLine(input.observationDate ?? null)}\n` : '';
   const speakerLine = input.userSpeaker
     ? `The user turns below were written by the automated agent "${input.userSpeaker}", not by the brain's owner: phrase their claims as "Agent ${input.userSpeaker} …" and attribute them "other".\n`
     : '';
-  const userContent = `${dateLine}${speakerLine}<turn>\n${cleaned}\n</turn>\n\nExtract up to ${cap} facts.${
+  const userContent = `${contractLine}${dateLine}${speakerLine}<turn>\n${cleaned}\n</turn>\n\nExtract up to ${cap} facts.${
     input.entityHints && input.entityHints.length
       ? ` Known entity slugs the user already mentioned: ${input.entityHints.slice(0, input.entityHintsCap ?? ENTITY_HINTS_CAP).join(', ')}.`
       : ''
@@ -808,6 +816,8 @@ export async function extractFactsFromTurnWithOutcome(
       continue;
     }
 
+    if (contract) factText = composeContractFact(contract, factText);
+
     const confidence = clampConfidence(candidate.confidence, missingConfidence);
     const validTier = ['high', 'medium', 'low'].includes(candidate.notability ?? '');
     if (input.notabilityAdmission) {
@@ -854,9 +864,10 @@ export async function extractFactsFromTurnWithOutcome(
       // where the prompt asked for JSON null — otherwise the resolver's
       // fallback adopts the token as the slug and the facts land unreachable
       // under entity_slug='null'. Same token set the `remember` verb applies.
-      entity_slug: isUnknownSpeakerLabel(candidate.entity) || isNullLikeEntity(candidate.entity)
-        ? null
-        : (candidate.entity ?? null),
+      entity_slug: contract ? contract.subject
+        : isUnknownSpeakerLabel(candidate.entity) || isNullLikeEntity(candidate.entity)
+          ? null
+          : (candidate.entity ?? null),
       source: input.source,
       source_session: input.sessionId ?? null,
       confidence,
@@ -870,9 +881,10 @@ export async function extractFactsFromTurnWithOutcome(
       // Date grounding: a validated extractor-stated event date wins over the
       // caller's fallback (backstop precedence). Malformed / out-of-range
       // dates are dropped, never guessed.
-      ...(variant.dateGrounding && parseExtractedEventDate(candidate.valid_from)
-        ? { valid_from: parseExtractedEventDate(candidate.valid_from)! }
-        : {}),
+      ...(contract ? { valid_from: contract.anchorTime }
+        : variant.dateGrounding && parseExtractedEventDate(candidate.valid_from)
+          ? { valid_from: parseExtractedEventDate(candidate.valid_from)! }
+          : {}),
       ...(variant.attribution && candidate.attributed_to ? { attributed_to: candidate.attributed_to } : {}),
     });
   }

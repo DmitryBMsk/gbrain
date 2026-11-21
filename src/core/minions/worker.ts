@@ -86,6 +86,12 @@ export const INFRASTRUCTURE_ABORT_REASONS = new Set<string>([
   ABORT_REASON_LOCK_RENEWAL_FAILED,
   ABORT_REASON_LOCK_LOST,
 ]);
+/** Requester-initiated cancel (`releaseInFlight`): the claim goes back to the
+ *  queue without burning an attempt, even if the handler returns anyway. */
+export const ABORT_REASON_RELEASE = 'release-requested';
+/** Durable result of the token-fenced terminal write ('dropped' = our claim was gone). */
+export type JobSettledOutcome = 'completed' | 'retry_scheduled' | 'dead' | 'released' | 'deferred' | 'dropped' | 'left_for_stall';
+export interface JobSettled { id: number; name: string; lockToken: string; outcome: JobSettledOutcome }
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { evaluateQuietHours, type QuietHoursConfig } from './quiet-hours.ts';
@@ -195,6 +201,8 @@ export interface MinionWorker {
   emit(event: 'ready'): boolean;
   on(event: 'unhealthy', listener: (info: UnhealthyReason) => void): this;
   emit(event: 'unhealthy', info: UnhealthyReason): boolean;
+  on(event: 'jobSettled', listener: (settled: JobSettled) => void): this;
+  emit(event: 'jobSettled', settled: JobSettled): boolean;
 }
 
 export class MinionWorker extends EventEmitter {
@@ -263,6 +271,7 @@ export class MinionWorker extends EventEmitter {
   private static readonly CHILD_SPAWN_FAIL_EXIT_AFTER = 3;
 
   private opts: Required<MinionWorkerOpts>;
+  private releaseRequested = false;
 
   /**
    * Event-loop-delay histogram (CDX-1/R2-9, issue #4145): the DIRECT
@@ -319,6 +328,9 @@ export class MinionWorker extends EventEmitter {
       jobIsolation: opts?.jobIsolation ?? 'inline',
       childCliInvocation: opts?.childCliInvocation ?? null,
       childTiniPath: opts?.childTiniPath ?? '',
+      queueMaintenance: opts?.queueMaintenance ?? true,
+      jobIds: opts?.jobIds ? [...opts.jobIds] : null,
+      shutdownGraceMs: opts?.shutdownGraceMs ?? 30_000,
       longJobNames: opts?.longJobNames ?? DEFAULT_LONG_JOB_NAMES,
       shortJobReservedSlots: opts?.shortJobReservedSlots ?? DEFAULT_SHORT_JOB_RESERVED_SLOTS,
       watchdogSuspectWaitMs: opts?.watchdogSuspectWaitMs ?? 60_000,
@@ -370,6 +382,11 @@ export class MinionWorker extends EventEmitter {
     return Array.from(this.handlers.keys());
   }
 
+  /** Read-only snapshot of claims this worker still holds (id + fencing token). */
+  get inFlightClaims(): ReadonlyArray<{ id: number; lockToken: string }> {
+    return Array.from(this.inFlight.values(), f => ({ id: f.job.id, lockToken: f.lockToken }));
+  }
+
   /**
    * True when the RSS watchdog drained this worker (vs a normal SIGTERM
    * shutdown). The CLI handler reads this after `start()` resolves to set
@@ -392,7 +409,7 @@ export class MinionWorker extends EventEmitter {
   private async probeOverdueSuspect(): Promise<void> {
     if (Date.now() < this.suspectProbeDueAt) return;
     this.suspectProbeDueAt = Date.now() + Math.min(this.opts.watchdogSuspectWaitMs, SUSPECT_PROBE_EVERY_MS);
-    this.suspectOverdue = await this.queue.hasOverdueWatchdogSuspect(this.opts.queue, this.registeredNames, this.opts.watchdogSuspectWaitMs)
+    this.suspectOverdue = await this.queue.hasOverdueWatchdogSuspect(this.opts.queue, this.registeredNames, this.opts.watchdogSuspectWaitMs, this.opts.jobIds ?? undefined)
       .catch(() => true);
   }
 
@@ -509,6 +526,7 @@ export class MinionWorker extends EventEmitter {
       throw new Error('No handlers registered. Call worker.register(name, handler) before start().');
     }
 
+    this.releaseRequested = false;
     this.running = true;
     if (this.engine.kind === 'postgres') {
       while (this.running) {
@@ -544,7 +562,7 @@ export class MinionWorker extends EventEmitter {
     // run; stop() disables it so embedding hosts / test suites that cycle
     // start()/stop() don't leak a ~50Hz native sampling timer per instance.
     try { this.eldHistogram?.enable(); } catch { /* fail-open */ }
-    this.wakeDrain ??= startWakeDrain(this.engine); // Wakeshift: the 5 s wake drainer (wakeshift/drain.ts), a no-op tick while off
+    if (this.opts.queueMaintenance) this.wakeDrain ??= startWakeDrain(this.engine); // Wakeshift: the 5 s wake drainer (wakeshift/drain.ts), a no-op tick while off
 
     // Graceful shutdown. Fires shutdownAbort so handlers subscribed to
     // `ctx.shutdownSignal` (currently: shell handler) can run their own cleanup
@@ -557,7 +575,7 @@ export class MinionWorker extends EventEmitter {
     // Stall + timeout detection on interval. Order matters: handleStalled FIRST
     // so a stalled job (lock_until expired) gets requeued before handleTimeouts'
     // `lock_until > now()` guard would skip it. Stall → retry, timeout → dead.
-    const stalledTimer = setInterval(async () => {
+    const stalledTimer = !this.opts.queueMaintenance ? undefined : setInterval(async () => {
       if (this.configurationError) return;
       // issue #1720: a dead pool used to spray "Stall detection error: write
       // CONNECTION_CLOSED ..." every tick forever — this interval was the only
@@ -804,8 +822,8 @@ export class MinionWorker extends EventEmitter {
 
     const runLoop = async () => {
       while (this.running) {
-        // Promote delayed jobs
-        try {
+        // Promote delayed jobs only for workers that own queue maintenance.
+        if (this.opts.queueMaintenance) try {
           await this.queue.promoteDelayed();
         } catch (e) {
           if (isLocalConfigurationError(e)) {
@@ -856,7 +874,7 @@ export class MinionWorker extends EventEmitter {
               this.opts.lockDuration,
               this.opts.queue,
               this.registeredNames,
-              { excludeWatchdogSuspects: this.inFlight.size > 0, suspectWaitMs: this.suspectOverdue ? this.opts.watchdogSuspectWaitMs : undefined, excludeNames: claimExclusions(this.opts, [...this.inFlight.values()].map(f => f.job.name)) },
+              { excludeWatchdogSuspects: this.inFlight.size > 0, suspectWaitMs: this.suspectOverdue ? this.opts.watchdogSuspectWaitMs : undefined, excludeNames: claimExclusions(this.opts, [...this.inFlight.values()].map(f => f.job.name)), ...(this.opts.jobIds === null ? {} : { jobIds: this.opts.jobIds }) },
             ).then(claimed => {
               if (claimed) {
                 this.executions.set(lockToken, { job: claimed, lockToken, stopped: true });
@@ -896,6 +914,11 @@ export class MinionWorker extends EventEmitter {
 
           if (job) {
             if (this.configurationError) break;
+            if (this.releaseRequested) {
+              await this.releaseClaim(job, lockToken);
+              this.executions.delete(lockToken);
+              break;
+            }
             // Post-claim fence re-check: the pre-claim marker check above
             // races migrate's marker write — this claim may have committed
             // after migrate's drain probe counted zero active jobs. A job
@@ -945,19 +968,7 @@ export class MinionWorker extends EventEmitter {
       process.removeListener('SIGTERM', shutdown);
       process.removeListener('SIGINT', shutdown);
 
-      // Graceful shutdown: wait for all in-flight jobs with timeout
-      if (this.configurationError) {
-        await this.drainConfiguration();
-      } else if (this.executions.size > 0) {
-        console.log(`Waiting for ${this.executions.size} in-flight job(s) to finish (30s timeout)...`);
-        const pending = Array.from(this.executions.values()).map(f => f.promise);
-        await Promise.race([
-          Promise.allSettled(pending),
-          new Promise(resolve => setTimeout(resolve, 30000)),
-        ]);
-        if (this.configurationError) await this.drainConfiguration();
-        else if (this.shutdownAbort.signal.aborted) this.drainForced = await releaseUndrainedClaims(this.engine, this.executions.values(), this.opts.jobIsolation === 'process');
-      }
+      await this.waitForShutdown();
 
       // The worker does NOT disconnect the engine: it doesn't own the
       // engine's lifecycle. The caller (CLI handler at src/commands/jobs.ts
@@ -1053,12 +1064,48 @@ export class MinionWorker extends EventEmitter {
     }
   }
 
+  private async waitForShutdown(): Promise<void> {
+    // Graceful shutdown: wait for all in-flight jobs with timeout
+    if (this.configurationError) {
+      await this.drainConfiguration();
+    } else if (this.executions.size > 0) {
+      console.log(`Waiting for ${this.executions.size} in-flight job(s) to finish (${this.opts.shutdownGraceMs / 1000}s timeout)...`);
+      const pending = Array.from(this.executions.values()).map(f => f.promise);
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise(resolve => setTimeout(resolve, this.opts.shutdownGraceMs)),
+      ]);
+      if (this.configurationError) await this.drainConfiguration();
+      else if (this.shutdownAbort.signal.aborted) this.drainForced = await releaseUndrainedClaims(this.engine, this.executions.values(), this.opts.jobIsolation === 'process');
+    }
+
+  }
+
   /** #5062: signal-driven shutdown entry (SIGTERM/SIGINT, or the `jobs work` signal owner). Idempotent. */
   requestShutdown(): void {
     if (this.running) console.log('Minion worker shutting down...');
     this.running = false;
     this.idleWaiter.wake('stop');
     if (!this.shutdownAbort.signal.aborted) this.shutdownAbort.abort(new Error('shutdown'));
+  }
+
+  /** Stop claiming and abort every held claim for a no-burn release (see ABORT_REASON_RELEASE). */
+  releaseInFlight(): void {
+    this.releaseRequested = true;
+    this.stop();
+    for (const entry of this.inFlight.values()) {
+      if (!entry.abort.signal.aborted) entry.abort.abort(new Error(ABORT_REASON_RELEASE));
+    }
+  }
+
+  private settle(job: MinionJob, lockToken: string, outcome: JobSettledOutcome): void {
+    try { this.emit('jobSettled', { id: job.id, name: job.name, lockToken, outcome } satisfies JobSettled); }
+    catch { /* observer errors never affect job recording */ }
+  }
+
+  private async releaseClaim(job: MinionJob, lockToken: string): Promise<void> {
+    const released = await this.queue.releaseLeaseFullJob(job.id, lockToken, `aborted: ${ABORT_REASON_RELEASE}`, 1_000);
+    this.settle(job, lockToken, released ? 'released' : 'dropped');
   }
 
   /** Stop the worker gracefully. */
@@ -1407,7 +1454,7 @@ export class MinionWorker extends EventEmitter {
           // also skip — the group SIGKILL already fired and executeJob's
           // own recording follows; a competing evict failJob('dead') could
           // dead-letter a job with attempts remaining (adversarial-review P3).
-          if (!this.configurationError && !INFRASTRUCTURE_ABORT_REASONS.has(reason) && this.opts.jobIsolation !== 'process') {
+          if (!this.configurationError && !INFRASTRUCTURE_ABORT_REASONS.has(reason) && reason !== ABORT_REASON_RELEASE && this.opts.jobIsolation !== 'process') {
             this.queue.failJob(
               job.id,
               lockToken,
@@ -1486,6 +1533,7 @@ export class MinionWorker extends EventEmitter {
   /** A handler deferral (JobDeferredError): back to delayed, no attempt counted. */
   private async deferJob(job: MinionJob, lockToken: string, err: JobDeferredError): Promise<void> {
     const deferred = await this.queue.deferJob(job.id, lockToken, `deferred (${err.reason}): ${err.message}`, err.retryInMs);
+    this.settle(job, lockToken, deferred ? 'deferred' : 'dropped');
     if (!deferred) console.warn(`Job ${job.id} deferral dropped (lock token mismatch)`);
     else console.log(`Job ${job.id} (${job.name}) deferred (${err.reason}) for ${Math.round(err.retryInMs / 1000)}s (no attempt burned)`);
   }
@@ -1498,7 +1546,8 @@ export class MinionWorker extends EventEmitter {
   ): Promise<void> {
     const handler = this.handlers.get(job.name);
     if (!handler) {
-      await this.queue.failJob(job.id, lockToken, `No handler for job type '${job.name}'`, 'dead');
+      const dead = await this.queue.failJob(job.id, lockToken, `No handler for job type '${job.name}'`, 'dead');
+      this.settle(job, lockToken, dead ? 'dead' : 'dropped');
       return;
     }
 
@@ -1564,6 +1613,10 @@ export class MinionWorker extends EventEmitter {
 
       clearInterval(lockTimer);
 
+      if (abort.signal.reason instanceof Error && abort.signal.reason.message === ABORT_REASON_RELEASE) {
+        return this.releaseClaim(job, lockToken);
+      }
+
       const stored = result != null ? (typeof result === 'object' ? result as Record<string, unknown> : { value: result }) : undefined;
       const verdict = jobResultOutcome(stored);
       const completed = verdict.outcome === 'failed'
@@ -1572,6 +1625,7 @@ export class MinionWorker extends EventEmitter {
       const execution = this.executions.get(lockToken);
       if (execution) execution.stopped = true;
 
+      this.settle(job, lockToken, !completed ? 'dropped' : verdict.outcome === 'failed' ? 'dead' : 'completed');
       if (!completed) {
         console.warn(`Job ${job.id} completion dropped (lock token mismatch, job was reclaimed)`);
         return;
@@ -1616,7 +1670,15 @@ export class MinionWorker extends EventEmitter {
       // after lockDuration - safetyMargin elapsed without renewal), so the
       // stall detector will pick the row up on its next poll and another
       // worker will claim it cleanly.
+      if (abortReason === ABORT_REASON_RELEASE) {
+        if (!isolated || childExecutionStopped || execution?.stopped === true || err instanceof ChildNotClaimedError || err instanceof ChildSpawnInfraError) {
+          return this.releaseClaim(job, lockToken);
+        }
+        this.settle(job, lockToken, 'left_for_stall');
+        return;
+      }
       if (abortReason !== null && INFRASTRUCTURE_ABORT_REASONS.has(abortReason)) {
+        this.settle(job, lockToken, 'left_for_stall');
         console.log(
           `Job ${job.id} (${job.name}) released after infrastructure abort (${abortReason}); ` +
           `stall detector will requeue (no attempt burned)`,
@@ -1657,6 +1719,7 @@ export class MinionWorker extends EventEmitter {
             message: errorText,
           });
         }
+        this.settle(job, lockToken, 'left_for_stall');
         return;
       }
       if (err instanceof ChildWorkerShutdownError || (!isolated && endedByShutdown(err, this.shutdownAbort.signal, abort.signal))) {
@@ -1666,6 +1729,7 @@ export class MinionWorker extends EventEmitter {
         // The child proved the claim is gone (reclaimed/cancelled before the
         // handler ran). The token-fenced failJob would no-op anyway — return
         // without burning anything against a claim we no longer hold.
+        this.settle(job, lockToken, 'dropped');
         console.log(`Job ${job.id} (${job.name}): ${errorText}`);
         return;
       }
@@ -1697,6 +1761,7 @@ export class MinionWorker extends EventEmitter {
         const released = await this.queue.releaseLeaseFullJob(
           job.id, lockToken, errorText, leaseBackoffMs,
         );
+        this.settle(job, lockToken, released ? 'deferred' : 'dropped');
         if (!released) {
           console.warn(`Job ${job.id} lease-full release dropped (lock token mismatch)`);
           return;
@@ -1725,69 +1790,70 @@ export class MinionWorker extends EventEmitter {
         return;
       }
 
-      const refusal = jobRefusal(err), isUnrecoverable = refusal !== null || err instanceof UnrecoverableError; // #7239: refusals end now
-      const attemptsExhausted = job.attempts_made + 1 >= job.max_attempts;
+      await this.recordJobFailure(job, lockToken, errorText, err);
+    }
+  }
 
-      let newStatus: 'delayed' | 'failed' | 'dead';
-      if (isUnrecoverable || attemptsExhausted) {
-        newStatus = 'dead';
-      } else {
-        newStatus = 'delayed';
-      }
+  private async recordJobFailure(job: MinionJob, lockToken: string, errorText: string, err: unknown): Promise<void> {
+    const refusal = jobRefusal(err), isUnrecoverable = refusal !== null || err instanceof UnrecoverableError; // #7239: refusals end now
+    const attemptsExhausted = job.attempts_made + 1 >= job.max_attempts;
 
-      const backoffMs = newStatus === 'delayed' ? calculateBackoff({
-        backoff_type: job.backoff_type,
-        backoff_delay: job.backoff_delay,
-        backoff_jitter: job.backoff_jitter,
-        attempts_made: job.attempts_made + 1,
-      }) : 0;
+    const newStatus = isUnrecoverable || attemptsExhausted ? 'dead' : 'delayed';
 
-      // issue #1720: failJob can itself throw during the same DB outage that
-      // failed the job. Pre-fix the rejection escaped to launchJob's .catch
-      // and the ORIGINAL job error was never logged anywhere — the recording
-      // error masked it. Log the original FIRST (it must survive no matter
-      // what), then reconnect + retry the recording once. If it still fails,
-      // leave the row to the stall detector: the lock has stopped renewing,
-      // so handleStalled requeues it cleanly on a live pool (the D8a path).
-      let failed: MinionJob | null;
+    const backoffMs = newStatus === 'delayed' ? calculateBackoff({
+      backoff_type: job.backoff_type,
+      backoff_delay: job.backoff_delay,
+      backoff_jitter: job.backoff_jitter,
+      attempts_made: job.attempts_made + 1,
+    }) : 0;
+
+    // issue #1720: failJob can itself throw during the same DB outage that
+    // failed the job. Pre-fix the rejection escaped to launchJob's .catch
+    // and the ORIGINAL job error was never logged anywhere — the recording
+    // error masked it. Log the original FIRST (it must survive no matter
+    // what), then reconnect + retry the recording once. If it still fails,
+    // leave the row to the stall detector: the lock has stopped renewing,
+    // so handleStalled requeues it cleanly on a live pool (the D8a path).
+    let failed: MinionJob | null;
+    try {
+      failed = await this.queue.failJob(job.id, lockToken, errorText, newStatus, backoffMs, refusal ? refusedJobResult(refusal) : undefined);
+    } catch (recordErr) {
+      const recordMsg = recordErr instanceof Error ? recordErr.message : String(recordErr);
+      console.error(
+        `Job ${job.id} (${job.name}) failed with: ${errorText} — and recording the failure threw: ${recordMsg}`,
+      );
+      if (!isRetryableConnError(recordErr)) throw recordErr;
+      await this.reconnectAfterConnectionError('failJob', recordErr);
       try {
         failed = await this.queue.failJob(job.id, lockToken, errorText, newStatus, backoffMs, refusal ? refusedJobResult(refusal) : undefined);
-      } catch (recordErr) {
-        const recordMsg = recordErr instanceof Error ? recordErr.message : String(recordErr);
-        console.error(
-          `Job ${job.id} (${job.name}) failed with: ${errorText} — and recording the failure threw: ${recordMsg}`,
-        );
-        if (!isRetryableConnError(recordErr)) throw recordErr;
-        await this.reconnectAfterConnectionError('failJob', recordErr);
-        try {
-          failed = await this.queue.failJob(job.id, lockToken, errorText, newStatus, backoffMs, refusal ? refusedJobResult(refusal) : undefined);
-        } catch (retryErr) {
-          if (isLocalConfigurationError(retryErr)) {
-            this.blockForConfiguration(retryErr);
-            return;
-          }
-          console.error(
-            `Job ${job.id} (${job.name}) failure-recording retry also failed ` +
-            `(${retryErr instanceof Error ? retryErr.message : String(retryErr)}); ` +
-            `leaving the row for the stall detector to requeue after lock expiry`,
-          );
+      } catch (retryErr) {
+        if (isLocalConfigurationError(retryErr)) {
+          this.blockForConfiguration(retryErr);
           return;
         }
-      }
-      if (!failed) {
-        console.warn(`Job ${job.id} failure dropped (lock token mismatch)`);
+        console.error(
+          `Job ${job.id} (${job.name}) failure-recording retry also failed ` +
+          `(${retryErr instanceof Error ? retryErr.message : String(retryErr)}); ` +
+          `leaving the row for the stall detector to requeue after lock expiry`,
+        );
+        this.settle(job, lockToken, 'left_for_stall');
         return;
       }
-      // Parent-failure hook (fail_parent / remove_dep / ignore / continue) is
-      // folded into queue.failJob() in the same transaction as the child status
-      // flip + remove_on_fail delete. Worker stays out of multi-statement
-      // crash-window territory.
+    }
+    this.settle(job, lockToken, !failed ? 'dropped' : newStatus === 'delayed' ? 'retry_scheduled' : 'dead');
+    if (!failed) {
+      console.warn(`Job ${job.id} failure dropped (lock token mismatch)`);
+      return;
+    }
+    // Parent-failure hook (fail_parent / remove_dep / ignore / continue) is
+    // folded into queue.failJob() in the same transaction as the child status
+    // flip + remove_on_fail delete. Worker stays out of multi-statement
+    // crash-window territory.
 
-      if (newStatus === 'delayed') {
-        console.log(`Job ${job.id} (${job.name}) failed, retrying in ${Math.round(backoffMs)}ms (attempt ${job.attempts_made + 1}/${job.max_attempts})`);
-      } else {
-        console.log(`Job ${job.id} (${job.name}) ${refusal ? `refused (${refusal.code}), not retried` : 'permanently failed'}: ${errorText}`);
-      }
+    if (newStatus === 'delayed') {
+      console.log(`Job ${job.id} (${job.name}) failed, retrying in ${Math.round(backoffMs)}ms (attempt ${job.attempts_made + 1}/${job.max_attempts})`);
+    } else {
+      console.log(`Job ${job.id} (${job.name}) ${refusal ? `refused (${refusal.code}), not retried` : 'permanently failed'}: ${errorText}`);
     }
   }
 }
