@@ -605,6 +605,8 @@ export async function runDrain(engine: BrainEngine, o: DrainOptions, deps: Drain
   const { withAIInvocationPreflight } = await import('../core/ai/invocation-guard.ts');
   const tracker = new BudgetTracker({
     label: `jobs-drain:${o.name}`, maxCostUsd: o.maxUsd, pricingOverrides: gates.overrides,
+    // Hidden SDK retries would bill attempts outside the one reservation --max-usd admitted.
+    providerRetries: 0,
     ...(deps.budgetAuditPath ? { auditPath: deps.budgetAuditPath } : {}),
   });
 

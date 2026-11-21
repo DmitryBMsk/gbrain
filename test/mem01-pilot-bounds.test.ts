@@ -434,6 +434,19 @@ describe('--max-model-attempts provider-family guard', () => {
   });
 });
 
+describe('uncapped drain SDK retries', () => {
+  test('without --max-model-attempts the SDK still makes no hidden retries beyond the --max-usd reservation', async () => {
+    for (const model of [undefined, MODEL]) {
+      await realGateway(() => 'good');
+      await factsJob();
+      const report = await keyed(() => runDrain(engine, opts(model ? { model } : {}), FAST));
+      expect(report.durable.completed).toBe(1);
+      expect(sdkCalls.length).toBeGreaterThan(0);
+      expect(sdkCalls.map(x => x.maxRetries)).toEqual(sdkCalls.map(() => 0));
+    }
+  });
+});
+
 describe('--max-model-attempts drain', () => {
   test('retries count; attempt N+1 never reaches the transport, claiming stops, the refused claim is deferred', async () => {
     await realGateway(malformedThenGood);
