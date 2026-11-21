@@ -28,6 +28,12 @@
  * The dream-budget audit JSONL snapshots the rate per call, so historical
  * estimates stay reproducible even after this table changes.
  *
+ * A published FUTURE rate change lives in CANONICAL_PRICE_CHANGES, never as a
+ * time-bombed edit: canonicalLookup(id, at) returns the rate in effect at `at`
+ * (default now), and canonicalReservationLookup(id, at) the highest rate in
+ * effect now or scheduled later — what a reservation must cover when its call
+ * may settle after the change.
+ *
  * Scope: PAID CLOUD chat models only. Free/local providers (llama-server,
  * zero-cost rerankers) are intentionally absent — callers treat those as
  * zero-cost elsewhere. Embeddings live in embedding-pricing.ts (different unit:
@@ -152,6 +158,10 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // lists today. Rates from Google's published pricing (2026-08-02).
   'google:gemini-2.5-flash':              { input:  0.30, output:  2.50 },
   'google:gemini-2.5-flash-lite':         { input:  0.10, output:  0.40 },
+  // Gemini 3.8 Flash, standard tier (verified 2026-09-28): the introductory
+  // rate through 2026-12-31 UTC; the published standard rate from 2027-01-01
+  // is in CANONICAL_PRICE_CHANGES. Output includes thinking tokens.
+  'google:gemini-3.8-flash':              { input:  0.75, output:  3.75 },
 
   // ── Together / DeepSeek (cross-modal-eval panel) ───────────────────────
   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo': { input: 0.88, output: 0.88 },
@@ -190,8 +200,29 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   'openrouter:qwen/qwen3.6-plus':               { input: 0.325, output: 1.95 },
 };
 
+/** A published rate that replaces a canonical row's rate from `effectiveFrom` (UTC instant). */
+export interface ScheduledPriceChange {
+  effectiveFrom: string;
+  pricing: ModelPricing;
+}
+
 /**
- * Resolve a model id to its canonical pricing, or `undefined` on miss.
+ * Published future rate changes, keyed by CANONICAL_PRICING key, ascending by
+ * `effectiveFrom`. The CANONICAL_PRICING row is the rate before the first
+ * change. Input/output rates only, and never `anthropic:` keys — the
+ * bare-keyed ANTHROPIC_PRICING view is derived statically (both pinned by
+ * test/model-pricing.test.ts).
+ */
+export const CANONICAL_PRICE_CHANGES: Record<string, readonly ScheduledPriceChange[]> = {
+  // Google standard tier: the introductory 3.8 Flash rate ends 2026-12-31 UTC.
+  'google:gemini-3.8-flash': [
+    { effectiveFrom: '2027-01-01T00:00:00Z', pricing: { input: 1.50, output: 7.50 } },
+  ],
+};
+
+/**
+ * Resolve a model id to the canonical pricing in effect at `at` (epoch ms or
+ * Date; default now), or `undefined` on miss.
  *
  * Accepts bare (`claude-opus-4-8`), colon (`anthropic:claude-opus-4-8`), and
  * slash (`anthropic/claude-opus-4-8`) forms. Bare ids default to the
@@ -207,35 +238,74 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
  */
 export function canonicalLookup(
   modelId: string | null | undefined,
+  at: number | Date = Date.now(),
 ): ModelPricing | undefined {
+  const key = canonicalPricingKeyFor(modelId);
+  if (!key) return undefined;
+  const t = instantMs(at);
+  let rate = CANONICAL_PRICING[key]!;
+  for (const change of scheduledChanges(key)) {
+    if (t >= Date.parse(change.effectiveFrom)) rate = change.pricing;
+  }
+  return rate;
+}
+
+/**
+ * The rate a RESERVATION made at `at` must cover: the element-wise maximum of
+ * the rate in effect at `at` and every rate scheduled after it. Equal to
+ * canonicalLookup for rows without a pending change; `undefined` on miss.
+ */
+export function canonicalReservationLookup(
+  modelId: string | null | undefined,
+  at: number | Date = Date.now(),
+): ModelPricing | undefined {
+  const key = canonicalPricingKeyFor(modelId);
+  if (!key) return undefined;
+  const t = instantMs(at);
+  let ceiling = canonicalLookup(key, t)!;
+  for (const change of scheduledChanges(key)) {
+    if (Date.parse(change.effectiveFrom) <= t) continue;
+    ceiling = {
+      input: Math.max(ceiling.input, change.pricing.input),
+      output: Math.max(ceiling.output, change.pricing.output),
+    };
+  }
+  return ceiling;
+}
+
+const instantMs = (at: number | Date): number => (typeof at === 'number' ? at : at.getTime());
+const scheduledChanges = (key: string): readonly ScheduledPriceChange[] =>
+  Object.hasOwn(CANONICAL_PRICE_CHANGES, key) ? CANONICAL_PRICE_CHANGES[key]! : [];
+
+/**
+ * Resolve any accepted spelling to its CANONICAL_PRICING key, or `undefined`.
+ * Own keys only: an inherited name (`constructor`, `toString`) is unpriced.
+ */
+function canonicalPricingKeyFor(modelId: string | null | undefined): string | undefined {
   if (!modelId) return undefined;
   // 1. Exact key — colon form, already-canonical ids, and slash-bearing model
   //    tails carried verbatim as keys (e.g. together:.../Llama-3.3-70B-...).
-  const direct = CANONICAL_PRICING[modelId];
-  if (direct) return direct;
+  if (Object.hasOwn(CANONICAL_PRICING, modelId)) return modelId;
   // 2. Normalize bare/slash via the shared splitter (colon-first precedence).
   const { provider, model } = splitProviderModelId(modelId);
   if (!model) return undefined;
   const key = provider ? `${provider}:${model}` : `anthropic:${model}`;
-  const normalized = CANONICAL_PRICING[key];
-  if (normalized) return normalized;
+  if (Object.hasOwn(CANONICAL_PRICING, key)) return key;
   // 3. #4123 (TODOS P3 case-sensitivity): case-insensitive fallback, folding
   //    BOTH sides — some canonical keys carry cased model tails verbatim
   //    (Llama-3.3-70B-...), so folding only the probe would miss those. Exact
   //    matches above stay first, so all-lowercase lookups pay nothing new.
   //    Safe only while no two canonical keys collide case-insensitively —
-  //    pinned by test/model-pricing.test.ts.
+  //    pinned by test/model-pricing.test.ts. The view maps to KEYS, not rates,
+  //    so a warm view never pins a dated rate.
   const folded = canonicalFoldedView();
-  return folded[modelId.toLowerCase()] ?? folded[key.toLowerCase()];
+  return folded.get(modelId.toLowerCase()) ?? folded.get(key.toLowerCase());
 }
 
-let _canonicalFoldedView: Record<string, ModelPricing> | null = null;
-function canonicalFoldedView(): Record<string, ModelPricing> {
+let _canonicalFoldedView: Map<string, string> | null = null;
+function canonicalFoldedView(): Map<string, string> {
   if (!_canonicalFoldedView) {
-    _canonicalFoldedView = {};
-    for (const [k, v] of Object.entries(CANONICAL_PRICING)) {
-      _canonicalFoldedView[k.toLowerCase()] = v;
-    }
+    _canonicalFoldedView = new Map(Object.keys(CANONICAL_PRICING).map((k) => [k.toLowerCase(), k]));
   }
   return _canonicalFoldedView;
 }

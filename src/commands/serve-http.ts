@@ -1579,17 +1579,21 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(result.status).json(result.body);
   });
 
-  // v0.41 D2 — live jobs dashboard data. Shares readSnapshot() with the
-  // TTY `gbrain jobs watch` command so the two surfaces stay 1:1.
+  // Live jobs dashboard: readSnapshot() panels shared with TTY `jobs watch`, plus the fail-soft
+  // default-queue `health` block (get_job_stats wedge + get_status_snapshot worker definitions).
   app.get('/admin/api/jobs/watch', requireAdmin, async (_req: Request, res: Response) => {
     try {
-      const { readSnapshot } = await import('./jobs-watch.ts');
+      const [{ readSnapshot }, { readJobsWatchHealth }] = await Promise.all([import('./jobs-watch.ts'), import('./jobs-watch-health.ts')]);
       const snap = await readSnapshot(engine);
-      res.json(snap);
+      res.json({ ...snap, health: await readJobsWatchHealth(engine) });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
     }
+  });
+  // Owner-only facts-absorb review: receipt facts (job source-scoped) beside their extraction-time source text.
+  app.get('/admin/api/facts-absorb/review', requireAdmin, async (req: Request, res: Response) => {
+    await (await import('./admin-fact-review.ts')).serveFactReview(engine, req, res);
   });
 
   // v0.36.1.0 (T15 / E6 / D23) — Calibration tab data endpoints.
@@ -2018,7 +2022,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   });
 
   app.post('/mcp', withBearerScopeHint(
-    requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read'],
+    requireBearerAuth({ verifier: resourceVerifier, resourceMetadataUrl }), ['read', 'write'],
   ), async (req: Request, res: Response) => {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;

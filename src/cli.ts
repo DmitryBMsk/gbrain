@@ -2938,6 +2938,14 @@ async function handleCliOnly(command: string, args: string[]) {
       }
       refuseThinClient('jobs', cfgJobs!.remote_mcp!.mcp_url);
     }
+    // Bounded one-handler drain: arguments are validated before any engine
+    // exists; the read-only preview connects probe-only (no migrations, no
+    // gateway refresh). Only an unblocked --yes run uses the ordinary boot.
+    if (args[0] === 'drain') {
+      const { runJobsDrainCli } = await import('./commands/jobs.ts');
+      await runJobsDrainCli(args, { probe: () => connectEngine({ probeOnly: true }), full: () => connectEngine() });
+      return;
+    }
   }
 
   // Autopilot status + uninstall are filesystem-only verdicts and MUST stay

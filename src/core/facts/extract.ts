@@ -32,6 +32,12 @@ import type { BrainEngine, NewFact, FactKind } from '../engine.ts';
 import { normalizeMetricLabel } from './extract-from-fence.ts';
 import { isNullLikeEntity } from './write-single.ts';
 import { isAIInvocationPolicyError } from '../ai/invocation-guard.ts';
+import {
+  SOURCE_CONTRACT_RULES,
+  composeContractFact,
+  renderContractBlock,
+  type FeedContract,
+} from './source-contract.ts';
 
 /**
  * v0.31 (D15): kill-switch for fact extraction.
@@ -210,6 +216,14 @@ export interface ExtractInput {
     allowed: readonly FactNotability[];
     invalid: 'drop';
   };
+  /**
+   * MEM-01: validated `gbrain_feed` contract of a producer page. When set, the
+   * prompt gains the source-contract rules + a data block, and every fact is
+   * labelled with its source/date, dated to the contract's source time, and
+   * attributed only to the contract subject (the model's entity is ignored).
+   * Absent → the conversation prompt and outputs are byte-identical.
+   */
+  sourceContract?: FeedContract;
 }
 
 /** A pre-INSERT fact ready for the engine.insertFact path. */
@@ -502,10 +516,14 @@ export async function extractFactsFromTurnWithOutcome(
     getFactsExtractionPromptAppendix(input.engine),
     isJunkFilterEnabled(input.engine),
   ]);
-  const extractorSystem = promptAppendix
-    ? `${buildExtractorSystem(admitsLow)}\n\n${promptAppendix}`
+  const contract = input.sourceContract;
+  const baseSystem = contract
+    ? `${buildExtractorSystem(admitsLow)}\n\n${SOURCE_CONTRACT_RULES}`
     : buildExtractorSystem(admitsLow);
-  const userContent = `<turn>\n${cleaned}\n</turn>\n\nExtract up to ${cap} facts.${
+  const extractorSystem = promptAppendix
+    ? `${baseSystem}\n\n${promptAppendix}`
+    : baseSystem;
+  const userContent = `${contract ? `${renderContractBlock(contract)}\n` : ''}<turn>\n${cleaned}\n</turn>\n\nExtract up to ${cap} facts.${
     input.entityHints && input.entityHints.length
       ? ` Known entity slugs the user already mentioned: ${input.entityHints.slice(0, ENTITY_HINTS_CAP).join(', ')}.`
       : ''
@@ -636,6 +654,10 @@ export async function extractFactsFromTurnWithOutcome(
       junkSkipped++;
       continue;
     }
+    // MEM-01: the source/date label is added AFTER the junk gate (which judges
+    // the model's claim) and BEFORE embedding, so the stored vector matches
+    // the stored text. The claim — never the label — absorbs truncation.
+    if (contract) factText = composeContractFact(contract, factText);
 
     const confidence = clampConfidence(candidate.confidence);
     const validTier = ['high', 'medium', 'low'].includes(candidate.notability ?? '');
@@ -681,9 +703,13 @@ export async function extractFactsFromTurnWithOutcome(
       // where the prompt asked for JSON null — otherwise the resolver's
       // fallback adopts the token as the slug and the facts land unreachable
       // under entity_slug='null'. Same token set the `remember` verb applies.
-      entity_slug: isUnknownSpeakerLabel(candidate.entity) || isNullLikeEntity(candidate.entity)
-        ? null
-        : (candidate.entity ?? null),
+      // MEM-01: on a contract page the subject comes only from the contract.
+      entity_slug: contract
+        ? contract.subject
+        : isUnknownSpeakerLabel(candidate.entity) || isNullLikeEntity(candidate.entity)
+          ? null
+          : (candidate.entity ?? null),
+      ...(contract ? { valid_from: contract.anchorTime } : {}),
       source: input.source,
       source_session: input.sessionId ?? null,
       confidence,

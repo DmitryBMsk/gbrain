@@ -1,4 +1,6 @@
 import { authorizeLegacyJobs, parseLegacyJobIds } from '../core/minions/authorize-legacy.ts';
+import { DRAIN_HELP, runJobsDrainCli } from './jobs-drain.ts';
+export { runJobsDrainCli };
 /**
  * CLI handler for `gbrain jobs` subcommands.
  * Thin wrapper around MinionQueue and MinionWorker.
@@ -375,6 +377,7 @@ USAGE
   gbrain jobs stats [--queue Q] [--cluster-errors] [--json]
                     (dream-inline-* queues report ABANDONED/live only with an
                      explicit --queue; use \`gbrain doctor\` to discover them)
+  gbrain jobs drain facts-absorb --max-jobs N --max-usd X [--max-runtime-min M] [--model P:M] [--yes] [--json]
   gbrain jobs smoke [--sigkill-rescue] [--wedge-rescue]
   gbrain jobs watch [--json] [--follow] [--refresh-ms=N]
   gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
@@ -439,7 +442,7 @@ HANDLER TYPES (built in)
                     GBRAIN_ALLOW_SHELL_JOBS=1) on the worker. Params: {cmd?,
                     argv?, cwd, env?}. See: docs/guides/minions-shell-jobs.md
 
-Detailed help: gbrain jobs {work|supervisor|submit|watch|prune} --help
+Detailed help: gbrain jobs {work|supervisor|submit|watch|prune|drain} --help
 Other subcommands are fully described above.
 `;
 
@@ -563,6 +566,7 @@ OPTIONS
   --dry-run            Print what would be submitted, submit nothing
   --redact-secrets     (shell jobs) scrub inherited env values from output
 `,
+  drain: DRAIN_HELP,
   watch: `gbrain jobs watch — live queue dashboard
 
 USAGE
@@ -879,6 +883,12 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         console.log(JSON.stringify(job, null, 2));
       }
       break;
+    }
+
+    case 'drain': {
+      // cli.ts dispatches drain engine-free first; this path serves library callers with a borrowed engine.
+      await runJobsDrainCli(args, { probe: async () => engine, full: async () => engine, owned: false });
+      return;
     }
 
     case 'list': {
@@ -2113,7 +2123,7 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
 export async function registerBuiltinHandlers(
   worker: MinionWorker,
   engine: BrainEngine,
-  opts?: { quiet?: boolean },
+  opts?: { quiet?: boolean; factsAbsorbModel?: string },
 ): Promise<void> {
   // `quiet` suppresses the informational startup stderr lines. The supervisor
   // (issue #1801) runs this against a throwaway worker purely to read
@@ -2542,11 +2552,13 @@ export async function registerBuiltinHandlers(
     const slug = typeof job.data.slug === 'string' ? job.data.slug : '';
     if (!slug) throw new Error('facts-absorb job requires data.slug');
     const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : 'default';
+    // opts.factsAbsorbModel (only `jobs drain --model` sets it) wins over the payload's; job.data is never rewritten.
+    const jobModel = opts?.factsAbsorbModel ?? (typeof job.data.model === 'string' && job.data.model ? job.data.model : undefined);
     const { readFactsBackstopJobPage } = await import('../core/persistence/effect-facts.ts');
     const input = await readFactsBackstopJobPage(engine, job.data);
     if ('skipped' in input) return { skipped: input.skipped, slug, sourceId };
     const page = input.page;
-    const { runFactsBackstop, coerceNotabilityFilter } = await import('../core/facts/backstop.ts');
+    const { runFactsBackstop, coerceNotabilityFilter, classifyUnavailable } = await import('../core/facts/backstop.ts');
     const KNOWN_SOURCES = ['sync:import', 'mcp:put_page', 'mcp:extract_facts', 'file_upload', 'code_import', 'hook:writeback'] as const;
     const source = (KNOWN_SOURCES as readonly string[]).includes(job.data.source as string)
       ? (job.data.source as typeof KNOWN_SOURCES[number])
@@ -2565,9 +2577,10 @@ export async function registerBuiltinHandlers(
         persistenceRequestId: typeof job.data.persistence_request_id === 'string' ? job.data.persistence_request_id : undefined,
         source,
         mode: 'inline',
+        abortSignal: job.signal,
         notabilityFilter: coerceNotabilityFilter(job.data.notabilityFilter),
         visibility: job.data.visibility === 'world' ? 'world' : 'private',
-        ...(typeof job.data.model === 'string' && job.data.model ? { model: job.data.model } : {}),
+        ...(jobModel ? { model: jobModel } : {}),
       },
     ).catch(async (err: unknown) => {
       const { writeFactsAbsorbFailure } = await import('../core/facts/absorb-log.ts');
@@ -2585,8 +2598,6 @@ export async function registerBuiltinHandlers(
     // classification runs in the WORKER process (the submitting hook
     // subprocess may have a deliberately neutered env).
     if (factsAbsorbUnavailable(result)) {
-      const { classifyUnavailable } = await import('../core/facts/backstop.ts');
-      const jobModel = typeof job.data.model === 'string' && job.data.model ? job.data.model : undefined;
       if (factsAbsorbShouldRetry(result, await classifyUnavailable(jobModel))) {
         const { FactsExtractionError } = await import('../core/facts/extract.ts');
         throw new FactsExtractionError('chat_unavailable', jobModel);

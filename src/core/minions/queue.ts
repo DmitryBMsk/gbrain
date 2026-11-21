@@ -1435,7 +1435,7 @@ export class MinionQueue {
   }
 
   /**
-   * Claim the next waiting job for a worker. Token-fenced, filters by registered names.
+   * Claim the next waiting job for a worker. Token-fenced, filters by registered names (and `jobIds`, when given).
    *
    * Sets timeout_at = now() + timeout_ms when the job has a per-job deadline,
    * so handleTimeouts() can dead-letter expired jobs without rereading timeout_ms.
@@ -1452,8 +1452,8 @@ export class MinionQueue {
    * The map binds as a RAW object (never JSON.stringify into ::jsonb — the
    * postgres.js double-encode trap; PGLite hides it, real PG does not).
    */
-  async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[]): Promise<MinionJob | null> {
-    if (registeredNames.length === 0) return null;
+  async claim(lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], jobIds?: readonly number[]): Promise<MinionJob | null> {
+    if (registeredNames.length === 0 || jobIds?.length === 0) return null; // an empty id selector selects nothing
     await assertNoUnreviewedJobs(this.engine);
 
     // Direct (session-mode) pool: claim opens the lock that renewLock then
@@ -1489,13 +1489,13 @@ export class MinionQueue {
         updated_at = now()
        WHERE id = (
          SELECT id FROM minion_jobs
-         WHERE queue = $3 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($4)
+         WHERE queue = $3 AND status = 'waiting' AND submission_authority IS NOT NULL AND name = ANY($4)${jobIds !== undefined ? ' AND id = ANY($7::bigint[])' : ''}
          ORDER BY priority ASC, created_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
        RETURNING *`,
-      [lockToken, lockDurationMs, queue, registeredNames, HANDLER_DEFAULT_TIMEOUT_MS, HANDLER_DEFAULT_LOCK_DURATION_MS]
+      [lockToken, lockDurationMs, queue, registeredNames, HANDLER_DEFAULT_TIMEOUT_MS, HANDLER_DEFAULT_LOCK_DURATION_MS, ...(jobIds !== undefined ? [[...jobIds]] : [])]
     );
     return rows.length > 0 ? rowToMinionJob(rows[0]) : null;
   }
@@ -2079,6 +2079,34 @@ export class MinionQueue {
        RETURNING *`
     ));
     return rows.map(rowToMinionJob);
+  }
+
+  /**
+   * Scoped promotion for a bounded single-name consumer (`gbrain jobs drain`):
+   * moves at most `limit` DUE delayed rows of exactly one (queue, name) back to
+   * waiting — same column resets as promoteDelayed. Future delays, other
+   * names/queues and every non-delayed status are never touched. Returns ids. `jobIds` narrows like claim().
+   */
+  async promoteDueDelayed(opts: { queue: string; name: string; limit: number; jobIds?: readonly number[] }): Promise<number[]> {
+    const limit = Math.floor(opts.limit);
+    if (!Number.isFinite(limit) || limit <= 0 || opts.jobIds?.length === 0) return [];
+    await assertNoUnreviewedJobs(this.engine);
+    const rows = await this.lockRetry(() => this.engine.executeRaw<{ id: number }>(
+      // MATERIALIZED: the picked set is computed exactly once. An IN (subquery
+      // LIMIT … FOR UPDATE) may be re-evaluated and exceed the limit.
+      `WITH picked AS MATERIALIZED (
+         SELECT id FROM minion_jobs
+          WHERE queue = $1 AND name = $2 AND status = 'delayed' AND delay_until <= now()${opts.jobIds !== undefined ? ' AND id = ANY($4::bigint[])' : ''}
+          ORDER BY priority ASC, delay_until ASC, id ASC
+          LIMIT $3
+          FOR UPDATE SKIP LOCKED)
+       UPDATE minion_jobs j SET status = 'waiting', delay_until = NULL, started_at = NULL,
+         lock_token = NULL, lock_until = NULL, updated_at = now()
+         FROM picked WHERE j.id = picked.id AND j.status = 'delayed'
+       RETURNING j.id`,
+      [opts.queue, opts.name, limit, ...(opts.jobIds !== undefined ? [[...opts.jobIds]] : [])],
+    ));
+    return rows.map(r => Number(r.id));
   }
 
   /** Detect and handle stalled jobs. Single CTE, no off-by-one. Returns affected jobs. */

@@ -151,7 +151,10 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/minions-shell-pglite.test.ts",
     "test/e2e/worker-abort-recovery.test.ts",
     "test/e2e/connector-sync-handler-pglite.test.ts",
+    "test/e2e/jobs-drain-parity.test.ts",
   ],
+  // Bounded one-handler drain: claim/lease fencing + budget on real Postgres.
+  "src/commands/jobs-drain.ts": ["test/e2e/jobs-drain-parity.test.ts"],
   // v0.46.31.0 chat-connectors wave (mapped at the test-gap-wave merge —
   // these arrived unclaimed): connector classify/sync core + doctor check.
   "src/core/connectors/**": [

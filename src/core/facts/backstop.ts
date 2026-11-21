@@ -46,6 +46,7 @@ import type { WriteReceipt } from '../persistence/types.ts';
 import type { GBrainConfig } from '../config.ts';
 import { isAvailable } from '../ai/gateway.ts';
 import { withAIInvocationPreflight } from '../ai/invocation-guard.ts';
+import { FEED_CONTRACT_INVALID_REASON, parseFeedContract, type FeedContract } from './source-contract.ts';
 
 /**
  * Notability-filter vocabulary shared by the durable facts-absorb payload
@@ -280,13 +281,24 @@ export async function runFactsBackstop(
       ? { mode: 'queue', enqueued: false, queueDepth: 0, skipped }
       : { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped };
   }
+  // MEM-01: a PRESENT but invalid `gbrain_feed` contract fails closed before
+  // any job, queue slot or model call — never a fallback to conversation
+  // semantics. Absent → unchanged legacy behavior.
+  const feed = parseFeedContract(parsedPage.frontmatter);
+  if (feed.status === 'invalid') {
+    const skipped = `eligibility_failed:${FEED_CONTRACT_INVALID_REASON}` as const;
+    return mode === 'queue'
+      ? { mode: 'queue', enqueued: false, queueDepth: 0, skipped }
+      : { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped };
+  }
+  const sourceContract = feed.status === 'ok' ? feed.contract : undefined;
   const { managedPersistenceEnabled } = await import('../persistence/ownership.ts');
   if (await managedPersistenceEnabled(ctx.engine)) {
     if (mode !== 'inline') {
       const { OperationError } = await import('../ops/contract.ts');
       throw new OperationError('writer_coordinator_required', 'Managed page backstops must use the durable publication outbox.');
     }
-    return { mode: 'inline', ...await runPipeline(parsedPage, ctx, ctx.abortSignal) };
+    return { mode: 'inline', ...await runPipeline(parsedPage, ctx, ctx.abortSignal, sourceContract) };
   }
 
   // --- Extraction availability gate (engine-aware, EXECUTION-process only) ---
@@ -390,7 +402,7 @@ export async function runFactsBackstop(
       // increments only). Now they land in ingest_log so doctor +
       // dashboard surface failure modes per source.
       try {
-        await runPipeline(parsedPage, ctx, signal);
+        await runPipeline(parsedPage, ctx, signal, sourceContract);
       } catch (err) {
         const { writeFactsAbsorbFailure } = await import('./absorb-log.ts');
         await writeFactsAbsorbFailure(ctx.engine, parsedPage.slug, err, ctx.sourceId);
@@ -426,7 +438,7 @@ export async function runFactsBackstop(
   if (!inlineModel) {
     return { mode: 'inline', inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], skipped: 'extraction_unavailable' };
   }
-  const r = await runPipeline(parsedPage, { ...ctx, model: inlineModel }, ctx.abortSignal);
+  const r = await runPipeline(parsedPage, { ...ctx, model: inlineModel }, ctx.abortSignal, sourceContract);
   return { mode: 'inline', ...r };
 }
 
@@ -489,6 +501,7 @@ async function runPipeline(
   parsedPage: ParsedPageInput,
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
+  sourceContract?: FeedContract,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
   return runPipelineWithBody(
     {
@@ -498,6 +511,7 @@ async function runPipeline(
       // #4819: page provenance for DB-only rows. The turn-path entry
       // (runFactsPipeline) has no page, so it leaves this unset.
       pageSlug: parsedPage.slug,
+      ...(sourceContract ? { sourceContract } : {}),
     },
     ctx,
     abortSignal,
@@ -532,7 +546,7 @@ async function runPipeline(
  * fallback regardless of local_path.
  */
 async function runPipelineWithBody(
-  input: { turnText: string; isDreamGenerated: boolean; ref?: string; pageSlug?: string },
+  input: PipelineBodyInput,
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
@@ -553,9 +567,46 @@ async function runPipelineWithBody(
   return runPipelineBodyInner(input, ctx, abortSignal);
 }
 
+/**
+ * MEM-01: exact-identity lookup for a contract observation — same source,
+ * same entity bucket (NULL included), same labelled text, same source page,
+ * still active. Plain parameterized read; no engine surface change.
+ */
+async function findExactObservation(
+  engine: BrainEngine,
+  sourceId: string,
+  entitySlug: string | null,
+  fact: string,
+  context: string | null,
+): Promise<number | null> {
+  const rows = await engine.executeRaw<{ id: number | string }>(
+    `SELECT id FROM facts
+      WHERE source_id = $1
+        AND entity_slug IS NOT DISTINCT FROM $2::text
+        AND fact = $3
+        AND context IS NOT DISTINCT FROM $4::text
+        AND expired_at IS NULL
+        AND (valid_until IS NULL OR valid_until > now())
+      ORDER BY id
+      LIMIT 1`,
+    [sourceId, entitySlug, fact, context],
+  );
+  return rows.length > 0 ? Number(rows[0].id) : null;
+}
+
+/** Page/turn input shared by the pipeline entry points. */
+interface PipelineBodyInput {
+  turnText: string;
+  isDreamGenerated: boolean;
+  ref?: string;
+  pageSlug?: string;
+  /** MEM-01: validated feed contract of the source page (page entry only). */
+  sourceContract?: FeedContract;
+}
+
 /** The actual pipeline body — always runs inside a BudgetTracker scope (#4210). */
 async function runPipelineBodyInner(
-  input: { turnText: string; isDreamGenerated: boolean; ref?: string; pageSlug?: string },
+  input: PipelineBodyInput,
   ctx: FactsBackstopCtx,
   abortSignal?: AbortSignal,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason }> {
@@ -601,6 +652,7 @@ async function runPipelineBodyInner(
     model: ctx.model,
     notabilityAdmission,
     ...(managed ? { embedding: managed.embedding ?? null } : {}),
+    ...(input.sourceContract ? { sourceContract: input.sourceContract } : {}),
   });
   const outcome = managed ? await withAIInvocationPreflight(async call => {
     if (call.kind !== 'embedding') return;
@@ -655,6 +707,10 @@ async function runPipelineBodyInner(
     resolutionSource: ResolutionSource | null;
   };
   const survived: SurvivedFact[] = [];
+  // MEM-01: contract facts always name their source page in `context` — the
+  // DB-only rows already did (#4819); the fence rows now do too.
+  const pageContext = ctx.sourceSlug ?? input.pageSlug ?? null;
+  const fenceContext = input.sourceContract ? pageContext : (ctx.sourceSlug ?? null);
 
   for (const f of facts) {
     if (abortSignal?.aborted) break;
@@ -672,7 +728,14 @@ async function runPipelineBodyInner(
     // have no embeddings; FS lock + sync invariant means DB == fence
     // at write time). Threshold 0.95 unchanged.
     let matchedExistingId: number | null = null;
-    if (resolvedSlug && f.embedding) {
+    if (input.sourceContract) {
+      // MEM-01: contract facts are dated observations. Only the exact same
+      // labelled claim (the label carries producer, kind and source time)
+      // from the same source page is a duplicate. Two different values, or
+      // the same value at another source time, stay separate records no
+      // matter how close their embeddings are.
+      matchedExistingId = await findExactObservation(ctx.engine, ctx.sourceId, resolvedSlug, f.fact, pageContext);
+    } else if (resolvedSlug && f.embedding) {
       const candidates = await ctx.engine.findCandidateDuplicates(
         ctx.sourceId,
         resolvedSlug,
@@ -795,7 +858,7 @@ async function runPipelineBodyInner(
       source: f.source,
       // #4206: the caller's source_slug (which page/transcript the turn came
       // from) lands in the fence context cell — visible in recall projections.
-      context: ctx.sourceSlug ?? null,
+      context: fenceContext,
       visibility,
       confidence: f.confidence,
       // #4206: extractor-derived date wins; then the caller's event time

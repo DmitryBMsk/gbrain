@@ -32,7 +32,7 @@ import { mkdirSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gbrainPath } from '../config.ts';
 import { ANTHROPIC_PRICING, type ModelPricing } from '../anthropic-pricing.ts';
-import { canonicalLookup } from '../model-pricing.ts';
+import { canonicalLookup, canonicalReservationLookup } from '../model-pricing.ts';
 import { EMBEDDING_PRICING, lookupEmbeddingPrice } from '../embedding-pricing.ts';
 import { splitProviderModelId } from '../model-id.ts';
 import { resolveRecipe } from '../ai/model-resolver.ts';
@@ -154,6 +154,45 @@ export async function loadPricingOverrides(
   }
 }
 
+/** Result of the strict read a caller that pins one model prices with. */
+export type PinnedPricingOverrides =
+  | { status: 'ok'; overrides: PricingOverrides | undefined }
+  | { status: 'unreadable' | 'invalid' };
+
+/**
+ * Strict sibling of loadPricingOverrides for a caller that pins `modelId`:
+ * a read failure or an unusable document cannot prove the pinned model has
+ * no override, so it is reported (`unreadable` / `invalid`), never treated as
+ * absence. Unset or blank is a proven absence. `invalid` also covers an entry
+ * for the pinned model that the parser would drop, or more than one entry
+ * spelling it. Other models' entries keep the lenient parse. Returns status
+ * codes only — never the document.
+ */
+export async function loadPricingOverridesForModel(
+  engine: { getConfig(key: string): Promise<string | null> },
+  modelId: string,
+): Promise<PinnedPricingOverrides> {
+  let raw: string | null;
+  try {
+    raw = await engine.getConfig('pricing.overrides');
+  } catch {
+    return { status: 'unreadable' };
+  }
+  if (raw == null || raw.trim() === '') return { status: 'ok', overrides: undefined };
+  let doc: unknown;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { status: 'invalid' };
+  }
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) return { status: 'invalid' };
+  const overrides = parsePricingOverrides(doc);
+  const pinned = new Set([modelId.trim().toLowerCase(), canonicalPricingKey(modelId.trim()).toLowerCase()]);
+  const entries = Object.keys(doc).filter((k) => pinned.has(k.trim().toLowerCase())).length;
+  if (entries > 1 || (entries === 1 && overrideFor(modelId, overrides) === null)) return { status: 'invalid' };
+  return { status: 'ok', overrides };
+}
+
 /**
  * Recipe-alias normalization shared by the override and table lookups:
  * `claude-cli:haiku` → `claude-cli:claude-haiku-4-5-20251001`. Bare ids and
@@ -179,6 +218,29 @@ function overrideFor(modelId: string, overrides?: PricingOverrides): ModelPricin
   if (!overrides) return null;
   const raw = modelId.trim().toLowerCase();
   return overrides[raw] ?? overrides[canonicalPricingKey(modelId.trim()).toLowerCase()] ?? null;
+}
+
+/**
+ * True when an operator override for this chat model would REPLACE a
+ * canonical rate: it differs from the rate in effect at `at`, or it would
+ * mask a published later change (the reservation ceiling). The override
+ * still wins in every cost computation; this only lets a caller that pins a
+ * model surface the replacement as a preflight blocker instead of silently
+ * repricing. Models the canonical table does not price never conflict.
+ */
+export function pricingOverrideConflicts(
+  modelId: string,
+  overrides: PricingOverrides | undefined,
+  at: number = Date.now(),
+): boolean {
+  const override = overrideFor(modelId, overrides);
+  if (!override) return false;
+  const key = canonicalPricingKey(modelId.trim());
+  const current = canonicalLookup(key, at);
+  const ceiling = canonicalReservationLookup(key, at);
+  if (!current || !ceiling) return false;
+  const same = (p: ModelPricing) => p.input === override.input && p.output === override.output;
+  return !same(current) || !same(ceiling);
 }
 
 export class BudgetExhausted extends Error {
@@ -277,7 +339,7 @@ const FREE_LOCAL_CHAT_PROVIDERS: ReadonlySet<string> = new Set([
   'llama-server',
 ]);
 
-function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
+function lookupPricing(modelId: string, kind: BudgetKind, forReservation = false): ModelPricing | null {
   if (kind === 'embed') {
     const hit = lookupEmbeddingPrice(modelId);
     if (hit.kind === 'known') {
@@ -324,8 +386,10 @@ function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
   // Fall back to the full canonical pricing table so non-Anthropic chat
   // models with a known price (openai:*, google:*, deepseek:*) resolve under
   // --max-cost instead of TX2 no_pricing hard-failing at $0. ANTHROPIC_PRICING
-  // above is only the bare-keyed Claude view.
-  const canon = canonicalLookup(key);
+  // above is only the bare-keyed Claude view. A reservation may settle after
+  // a published rate change, so it prices at the highest rate in effect now
+  // or scheduled later; a settlement prices at the rate in effect now.
+  const canon = forReservation ? canonicalReservationLookup(key) : canonicalLookup(key);
   if (canon) return canon;
   // Local-inference chat providers cost electricity, not tokens. Checked AFTER
   // the canonical table so an explicitly-priced local entry, should one ever be
@@ -353,11 +417,12 @@ function costForUsage(
   outputTokens: number,
   kind: BudgetKind,
   overrides?: PricingOverrides,
+  forReservation = false,
 ): number | null {
   // #4312: operator overrides win — the operator owns their bill (negotiated
   // rates, proxy routes the shipped tables can't know about). Missing both →
   // null, and the TX2 fail-closed contract in reserve() still applies.
-  const p = overrideFor(modelId, overrides) ?? lookupPricing(modelId, kind);
+  const p = overrideFor(modelId, overrides) ?? lookupPricing(modelId, kind, forReservation);
   if (!p) return null;
   return (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output;
 }
@@ -419,6 +484,10 @@ export class BudgetTracker {
    *
    * When maxCostUsd is unset, missing pricing warns-once but does not throw
    * (legacy behavior preserved for non-priced providers).
+   *
+   * Canonical rates project at canonicalReservationLookup (the highest rate
+   * in effect now or published for later), so a call reserved before a price
+   * increase stays covered when record() settles it after the increase.
    */
   reserve(estimate: BudgetEstimate): void {
     this.assertRuntime(estimate.modelId);
@@ -429,6 +498,7 @@ export class BudgetTracker {
       estimate.maxOutputTokens,
       estimate.kind,
       this.opts.pricingOverrides,
+      true,
     );
 
     if (projected === null) {

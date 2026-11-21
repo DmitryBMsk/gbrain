@@ -259,6 +259,19 @@ export interface MinionWorkerOpts {
   childCliInvocation?: { cmd: string; argsPrefix: string[] } | null;
   /** tini path for wrapping job children ('' = absent, direct spawn). */
   childTiniPath?: string;
+  /** Queue-global maintenance: delayed promotion on every poll plus the
+   *  stall / timeout / wall-clock / waiting-TTL sweeps. These touch rows of
+   *  EVERY name and queue, not only registered handlers. Default true (every
+   *  daemon worker). A handler-scoped one-shot worker (`gbrain jobs drain`)
+   *  sets false so starting it cannot mutate unrelated jobs. */
+  queueMaintenance?: boolean;
+  /** Claim only these job ids (`gbrain jobs drain --job-ids`), alongside the
+   *  queue/name/authority predicates. Empty = claim nothing; unset/null = no
+   *  selector (every row of the registered names). */
+  jobIds?: readonly number[] | null;
+  /** How long start() waits for in-flight jobs after the loop stops (default 30000ms).
+   *  start() can therefore resolve while a handler is still running. */
+  shutdownGraceMs?: number;
 }
 
 // --- Job Context (passed to handlers) ---
