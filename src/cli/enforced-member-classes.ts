@@ -45,6 +45,8 @@ const REFUSED_OPS = [
   'schema_lint', 'schema_review_orphans', 'schema_stats', 'search_by_image', 'search_modes', 'sync_brain_skills',
   'synthesize', 'takes_calibration', 'takes_list', 'takes_scorecard', 'takes_search', 'volunteer_chronicle',
   'volunteer_context', 'wanted_pages', 'storage_find', 'storage_get', 'storage_list',
+  // Lumenix fork ops: no enforced-member use; refused like the other uncovered reads
+  'pack_evidence', 'suggest_skill',
   // GST-2988: originals of redacted secrets are the brain owner's, never an enforced member's
   'reveal_secret',
   // hidden operations: no CLI path reaches them (their CLI names are CLI-only commands or gbrain call)

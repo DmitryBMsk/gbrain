@@ -152,6 +152,9 @@ const LEDGER: Record<string, string> = {
   takes_remove: 'test/takes-verbs-5167-5214.test.ts',
   takes_rebuild: 'test/persistence-local-only-ops.test.ts',
   whoami: 'test/whoami.test.ts',
+  // Lumenix fork ops
+  pack_evidence: 'test/lumenix-evidence.test.ts',
+  suggest_skill: 'test/lumenix-typesafe.test.ts',
   sources_add: 'test/sources-mcp.test.ts',
   sources_list: 'test/sources-mcp.test.ts',
   sources_remove: 'test/sources-mcp.test.ts',

@@ -3243,6 +3243,13 @@
       },
       {
         "kind": "variable",
+        "name": "CANONICAL_PRICE_CHANGES",
+        "signature": [
+          "Record<string, readonly ScheduledPriceChange[]>"
+        ]
+      },
+      {
+        "kind": "variable",
         "name": "CANONICAL_PRICING",
         "signature": [
           "Record<string, ModelPricing>"
@@ -3271,10 +3278,25 @@
         "name": "ModelPricing"
       },
       {
+        "kind": "interface",
+        "members": [
+          "effectiveFrom: string",
+          "pricing: ModelPricing"
+        ],
+        "name": "ScheduledPriceChange"
+      },
+      {
         "kind": "function",
         "name": "canonicalLookup",
         "signature": [
-          "(modelId: string | null | undefined) => ModelPricing | undefined"
+          "(modelId: string | null | undefined, at?: number | Date) => ModelPricing | undefined"
+        ]
+      },
+      {
+        "kind": "function",
+        "name": "canonicalReservationLookup",
+        "signature": [
+          "(modelId: string | null | undefined, at?: number | Date) => ModelPricing | undefined"
         ]
       },
       {
@@ -6759,7 +6781,7 @@
           "addAttachment: (jobId: number, input: AttachmentInput) => Promise<Attachment>",
           "cancelJob: (id: number, opts?: { ownerClientId?: string; ownerActor?: JobActor; }) => Promise<MinionJob | null>",
           "cancelJobs: (ids: number[], opts?: { reason?: string; rootStatuses?: MinionJobStatus[]; ownerClientId?: string; ownerActor?: JobActor; }) => Promise<MinionJob[]>",
-          "claim: (lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], opts?: { excludeWatchdogSuspects?: boolean; suspectWaitMs?: number; excludeNames?: string[]; }) => Promise<MinionJob | null>",
+          "claim: (lockToken: string, lockDurationMs: number, queue: string, registeredNames: string[], opts?: { excludeWatchdogSuspects?: boolean; suspectWaitMs?: number; excludeNames?: string[]; jobIds?: readonly number[]; }) => Promise<MinionJob | null>",
           "classifyPrivateQueueForRecovery: (queueName: string) => Promise<\"orphan\" | \"live\" | \"unowned\" | \"not_orphan\">",
           "completeJob: (id: number, lockToken: string, result?: Record<string, unknown>) => Promise<MinionJob | null>",
           "deferJob: (id: number, lockToken: string, note: string, delayMs: number) => Promise<MinionJob | null>",
@@ -6775,7 +6797,7 @@
           "handleTimeouts: () => Promise<MinionJob[]>",
           "handleWaitingTTL: (opts?: { maxPerTick?: number; }) => Promise<{ cancelled: number; by_name: Record<string, number>; }>",
           "handleWallClockTimeouts: (lockDurationMs: number) => Promise<MinionJob[]>",
-          "hasOverdueWatchdogSuspect: (queue: string, registeredNames: string[], suspectWaitMs: number) => Promise<boolean>",
+          "hasOverdueWatchdogSuspect: (queue: string, registeredNames: string[], suspectWaitMs: number, jobIds?: readonly number[]) => Promise<boolean>",
           "listAttachments: (jobId: number) => Promise<Attachment[]>",
           "makeThrottledLeaseRenewer: (queueName: string, ownerToken: string, onRenewed?: () => Promise<void> | void, throttleMs?: number) => () => Promise<void>",
           "pauseJob: (id: number) => Promise<MinionJob | null>",
@@ -6784,6 +6806,7 @@
           "private lockParentsOrdered",
           "private lockRetry",
           "promoteDelayed: () => Promise<MinionJob[]>",
+          "promoteDueDelayed: (opts: { queue: string; name: string; limit: number; jobIds?: readonly number[]; }) => Promise<number[]>",
           "prune: (opts?: { olderThan?: Date; status?: MinionJobStatus[]; dryRun?: boolean; }) => Promise<number>",
           "readChildCompletions: (parentId: number, lockToken: string, opts?: { since?: Date; }) => Promise<ChildDoneMessage[]>",
           "readInbox: (jobId: number, lockToken: string) => Promise<InboxMessage[]>",
@@ -6821,14 +6844,15 @@
           "configurationError: LocalConfigurationError | null",
           "configurationReleaseResults: readonly ConfigurationReleaseResult[]",
           "drainForced: boolean",
-          "emit: { (event: \"ready\"): boolean; (event: \"unhealthy\", info: UnhealthyReason): boolean; }",
+          "emit: { (event: \"ready\"): boolean; (event: \"unhealthy\", info: UnhealthyReason): boolean; (event: \"jobSettled\", settled: JobSettled): boolean; }",
           "eventNames: () => (string | symbol)[]",
           "getHandler: (name: string) => MinionHandler | undefined",
           "getMaxListeners: () => number",
+          "inFlightClaims: readonly { id: number; lockToken: string; }[]",
           "listenerCount: <E extends string | symbol>(eventName: string | symbol, listener?: ((...args: any[]) => void) | undefined) => number",
           "listeners: <E extends string | symbol>(eventName: string | symbol) => ((...args: any[]) => void)[]",
           "off: <E extends string | symbol>(eventName: string | symbol, listener: (...args: any[]) => void) => MinionWorker",
-          "on: { (event: \"ready\", listener: () => void): MinionWorker; (event: \"unhealthy\", listener: (info: UnhealthyReason) => void): MinionWorker; }",
+          "on: { (event: \"ready\", listener: () => void): MinionWorker; (event: \"unhealthy\", listener: (info: UnhealthyReason) => void): MinionWorker; (event: \"jobSettled\", listener: (settled: JobSettled) => void): MinionWorker; }",
           "once: <E extends string | symbol>(eventName: string | symbol, listener: (...args: any[]) => void) => MinionWorker",
           "prependListener: <E extends string | symbol>(eventName: string | symbol, listener: (...args: any[]) => void) => MinionWorker",
           "prependOnceListener: <E extends string | symbol>(eventName: string | symbol, listener: (...args: any[]) => void) => MinionWorker",
@@ -6866,17 +6890,23 @@
           "private probeOverdueSuspect",
           "private queue",
           "private reconnectAfterConnectionError",
+          "private recordJobFailure",
+          "private releaseClaim",
           "private releaseClaimForPause",
+          "private releaseRequested",
           "private running",
+          "private settle",
           "private shutdownAbort",
           "private suspectOverdue",
           "private suspectProbeDueAt",
+          "private waitForShutdown",
           "private wakeDrain",
           "private workerId",
           "rawListeners: <E extends string | symbol>(eventName: string | symbol) => ((...args: any[]) => void)[]",
           "readonly idleWaiter: IdleWaiter",
           "register: (name: string, handler: MinionHandler) => void",
           "registeredNames: string[]",
+          "releaseInFlight: () => void",
           "removeAllListeners: <E extends string | symbol>(eventName?: string | symbol | undefined) => MinionWorker",
           "removeListener: <E extends string | symbol>(eventName: string | symbol, listener: (...args: any[]) => void) => MinionWorker",
           "requestShutdown: () => void",
@@ -6916,6 +6946,7 @@
           "dbProbeTimeoutMs?: number | undefined",
           "getRss?: (() => number) | undefined",
           "healthCheckInterval?: number | undefined",
+          "jobIds?: readonly number[] | null | undefined",
           "jobIsolation?: \"inline\" | \"process\" | undefined",
           "lockDuration?: number | undefined",
           "longJobNames?: readonly string[] | undefined",
@@ -6924,8 +6955,10 @@
           "onJobSettled?: ((job: MinionJob) => void) | undefined",
           "pollInterval?: number | undefined",
           "queue?: string | undefined",
+          "queueMaintenance?: boolean | undefined",
           "rssCheckInterval?: number | undefined",
           "shortJobReservedSlots?: number | undefined",
+          "shutdownGraceMs?: number | undefined",
           "stallExitAfterMs?: number | undefined",
           "stallWarnAfterMs?: number | undefined",
           "stalledInterval?: number | undefined",
